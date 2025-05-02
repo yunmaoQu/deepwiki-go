@@ -16,17 +16,20 @@ type OpenAIRAG struct {
 	Config    *config.Config
 	DbManager *data.DatabaseManager
 	RepoURL   string
-	Documents []models.Document
 	// TODO: 添加 OpenAI 客户端
 }
 
 // NewOpenAIRAG 创建一个新的 OpenAI RAG 实例
-func NewOpenAIRAG(cfg *config.Config) *OpenAIRAG {
+func NewOpenAIRAG(cfg *config.Config) (*OpenAIRAG, error) {
+	dbManager, err := data.NewDatabaseManager()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DatabaseManager: %w", err)
+	}
 	return &OpenAIRAG{
 		Memory:    NewMemory(),
 		Config:    cfg,
-		DbManager: data.NewDatabaseManager(),
-	}
+		DbManager: dbManager,
+	}, nil
 }
 
 // Name 返回提供者的唯一名称
@@ -47,22 +50,17 @@ func (r *OpenAIRAG) Initialize() error {
 // PrepareRetriever 为仓库准备检索器
 func (r *OpenAIRAG) PrepareRetriever(repoURLOrPath string, accessToken string) error {
 	r.RepoURL = repoURLOrPath
-	var err error
-	r.Documents, err = r.DbManager.PrepareDatabase(repoURLOrPath, accessToken)
+	err := r.DbManager.PrepareDatabase(repoURLOrPath, accessToken)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to prepare database: %w", err)
 	}
 
-	log.Printf("已加载 %d 个文档用于检索", len(r.Documents))
+	log.Println("Database prepared for retrieval")
 	return nil
 }
 
 // RetrieveDocuments 检索与查询相关的文档
 func (r *OpenAIRAG) RetrieveDocuments(query string) ([]models.Document, error) {
-	if len(r.Documents) == 0 {
-		return nil, errors.New("没有可用于检索的文档")
-	}
-
 	// 使用向量搜索检索相关文档
 	relevantDocs, err := r.DbManager.SearchDocuments(query, r.Config.Retriever.TopK)
 	if err != nil {

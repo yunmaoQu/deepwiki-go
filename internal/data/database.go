@@ -2,170 +2,253 @@
 package data
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"sync"
 
 	"github.com/deepwiki-go/internal/models"
 	"github.com/deepwiki-go/pkg/utils"
+	"github.com/milvus-io/milvus-sdk-go/v2/client"
+	"github.com/milvus-io/milvus-sdk-go/v2/entity"
+)
+
+const (
+	collectionName     = "deepwiki_documents"
+	embeddingDimension = 768               // Example dimension, replace with your model's dimension
+	milvusAddress      = "localhost:19530" // Default Milvus address
 )
 
 // DatabaseManager 管理文档数据库
 type DatabaseManager struct {
-	db            map[string]models.Document
+	milvusClient  client.Client
 	repoURLOrPath string
 	repoPaths     map[string]string
+	mu            sync.RWMutex // To protect access to internal state if needed
+	initialized   bool
 }
 
 // NewDatabaseManager 创建一个新的数据库管理器
-func NewDatabaseManager() *DatabaseManager {
-	return &DatabaseManager{
-		db:        make(map[string]models.Document),
-		repoPaths: make(map[string]string),
-	}
-}
+func NewDatabaseManager() (*DatabaseManager, error) {
 
-// PrepareDatabase 从仓库创建一个新的数据库
-func (dm *DatabaseManager) PrepareDatabase(repoURLOrPath string, accessToken string) ([]models.Document, error) {
-	dm.resetDatabase()
-	if err := dm.createRepo(repoURLOrPath, accessToken); err != nil {
-		return nil, err
-	}
-	return dm.prepareDBIndex()
-}
-
-// resetDatabase 将数据库重置为初始状态
-func (dm *DatabaseManager) resetDatabase() {
-	dm.db = make(map[string]models.Document)
-	dm.repoURLOrPath = ""
-	dm.repoPaths = make(map[string]string)
-}
-
-// createRepo 下载并准备所有路径
-func (dm *DatabaseManager) createRepo(repoURLOrPath string, accessToken string) error {
-	log.Printf("为 %s 准备仓库存储...", repoURLOrPath)
-
-	// 获取根路径
-	rootPath := utils.GetDefaultRootPath()
-
-	os.MkdirAll(rootPath, 0755)
-
-	// 处理URL或本地路径
-	if strings.HasPrefix(repoURLOrPath, "https://") || strings.HasPrefix(repoURLOrPath, "http://") {
-		// 根据 URL 格式提取仓库名称
-		var repoName string
-
-		if strings.Contains(repoURLOrPath, "github.com") {
-			// GitHub URL 格式: https://github.com/owner/repo
-			repoName = strings.Split(repoURLOrPath, "/")[len(strings.Split(repoURLOrPath, "/"))-1]
-			repoName = strings.TrimSuffix(repoName, ".git")
-		} else if strings.Contains(repoURLOrPath, "gitlab.com") {
-			// GitLab URL 格式: https://gitlab.com/owner/repo 或 https://gitlab.com/group/subgroup/repo
-			repoName = strings.Split(repoURLOrPath, "/")[len(strings.Split(repoURLOrPath, "/"))-1]
-			repoName = strings.TrimSuffix(repoName, ".git")
-		} else {
-			// 通用处理其他 Git URL
-			repoName = strings.Split(repoURLOrPath, "/")[len(strings.Split(repoURLOrPath, "/"))-1]
-			repoName = strings.TrimSuffix(repoName, ".git")
-		}
-
-		saveRepoDir := filepath.Join(rootPath, "repos", repoName)
-
-		// 检查仓库目录是否已存在且非空
-		if !dm.directoryExistsAndNotEmpty(saveRepoDir) {
-			// 仅当仓库不存在或为空时下载
-			if err := utils.DownloadRepo(repoURLOrPath, saveRepoDir, accessToken); err != nil {
-				return err
-			}
-		} else {
-			log.Printf("仓库已存在于 %s。使用现有仓库。", saveRepoDir)
-		}
-
-		dm.repoPaths = map[string]string{
-			"save_repo_dir": saveRepoDir,
-			"save_db_file":  filepath.Join(rootPath, "databases", fmt.Sprintf("%s.json", repoName)),
-		}
-	} else { // 本地路径
-		repoName := filepath.Base(repoURLOrPath)
-		saveRepoDir := repoURLOrPath
-
-		dm.repoPaths = map[string]string{
-			"save_repo_dir": saveRepoDir,
-			"save_db_file":  filepath.Join(rootPath, "databases", fmt.Sprintf("%s.json", repoName)),
-		}
+	log.Printf("Connecting to Milvus at %s", milvusAddress)
+	milvusClient, err := client.NewClient(context.Background(), client.Config{
+		Address: milvusAddress,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to Milvus: %w", err)
 	}
 
-	dm.repoURLOrPath = repoURLOrPath
-	os.MkdirAll(dm.repoPaths["save_repo_dir"], 0755)
-	os.MkdirAll(filepath.Dir(dm.repoPaths["save_db_file"]), 0755)
+	dm := &DatabaseManager{
+		milvusClient: milvusClient,
+		repoPaths:    make(map[string]string),
+	}
 
-	log.Printf("仓库路径: %v", dm.repoPaths)
+	err = dm.ensureCollectionExists()
+	if err != nil {
+		// Close client if initialization fails
+		dm.milvusClient.Close()
+		return nil, fmt.Errorf("failed to ensure Milvus collection: %w", err)
+	}
+
+	log.Println("DatabaseManager initialized successfully with Milvus")
+	return dm, nil
+}
+
+// ensureCollectionExists checks if the collection exists and creates it if not.
+func (dm *DatabaseManager) ensureCollectionExists() error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	if dm.initialized {
+		return nil
+	}
+
+	ctx := context.Background()
+	has, err := dm.milvusClient.HasCollection(ctx, collectionName)
+	if err != nil {
+		return fmt.Errorf("failed to check if collection exists: %w", err)
+	}
+
+	if !has {
+		log.Printf("Collection '%s' does not exist. Creating...", collectionName)
+		// Define schema
+		schema := &entity.Schema{
+			CollectionName: collectionName,
+			Description:    "DeepWiki document collection",
+			AutoID:         false,
+			Fields: []*entity.Field{
+				{
+					Name:         "doc_id",
+					DataType:     entity.FieldTypeInt64,
+					IsPrimaryKey: true,
+					AutoID:       false,
+				},
+				{
+					Name:      "file_path", // Store original file path
+					DataType:  entity.FieldTypeVarChar,
+					MaxLength: 1024, // Adjust as needed
+				},
+				{
+					Name:     "embedding",
+					DataType: entity.FieldTypeFloatVector,
+					TypeParams: map[string]string{
+						"dim": fmt.Sprintf("%d", embeddingDimension),
+					},
+				},
+				{
+					Name:      "raw_text", // Store the raw text chunk
+					DataType:  entity.FieldTypeVarChar,
+					MaxLength: 65535, // Max length for VarChar
+				},
+				{
+					Name:      "metadata_json", // Store metadata as JSON string
+					DataType:  entity.FieldTypeVarChar,
+					MaxLength: 65535,
+				},
+			},
+		}
+
+		err = dm.milvusClient.CreateCollection(ctx, schema, entity.DefaultShardNumber)
+		if err != nil {
+			return fmt.Errorf("failed to create collection '%s': %w", collectionName, err)
+		}
+		log.Printf("Collection '%s' created successfully.", collectionName)
+
+		// Create index for the embedding field after creating the collection
+		log.Printf("Creating index for embedding field...")
+		index, err := entity.NewIndexHNSW(entity.L2, 8, 200) // Example HNSW params
+		if err != nil {
+			return fmt.Errorf("failed to create HNSW index parameters: %w", err)
+		}
+		err = dm.milvusClient.CreateIndex(ctx, collectionName, "embedding", index, false)
+		if err != nil {
+			return fmt.Errorf("failed to create index on 'embedding': %w", err)
+		}
+		log.Printf("Index created successfully for embedding field.")
+	} else {
+		log.Printf("Collection '%s' already exists.", collectionName)
+	}
+
+	// Load collection into memory for searching
+	log.Printf("Loading collection '%s' into memory...", collectionName)
+	err = dm.milvusClient.LoadCollection(ctx, collectionName, false)
+	if err != nil {
+		return fmt.Errorf("failed to load collection '%s': %w", collectionName, err)
+	}
+	log.Printf("Collection '%s' loaded successfully.", collectionName)
+
+	dm.initialized = true
 	return nil
 }
 
-// directoryExistsAndNotEmpty 检查目录是否存在且非空
-func (dm *DatabaseManager) directoryExistsAndNotEmpty(path string) bool {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false
+// Close cleans up the Milvus connection
+func (dm *DatabaseManager) Close() {
+	if dm.milvusClient != nil {
+		dm.milvusClient.Close()
+		log.Println("Milvus connection closed.")
 	}
-	if !info.IsDir() {
-		return false
-	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false
-	}
-
-	return len(entries) > 0
 }
 
-// prepareDBIndex 为仓库准备索引数据库
-func (dm *DatabaseManager) prepareDBIndex() ([]models.Document, error) {
-	// 检查数据库
-	if dm.repoPaths != nil && dm.fileExists(dm.repoPaths["save_db_file"]) {
-		log.Println("加载现有数据库...")
+// generateDocID creates a unique Int64 ID from a string (e.g., file path)
+func generateDocID(identifier string) int64 {
+	hasher := sha256.New()
+	hasher.Write([]byte(identifier))
+	hash := hasher.Sum(nil)
+	// Use the first 8 bytes of the hash to create an int64
+	// Note: This can lead to collisions, although unlikely for typical repo sizes.
+	// A more robust approach might involve a central ID registry or UUIDs if collisions are a concern.
+	return int64(binary.BigEndian.Uint64(hash[:8]))
+}
 
-		documents, err := dm.loadDocumentsFromFile(dm.repoPaths["save_db_file"])
-		if err == nil && len(documents) > 0 {
-			log.Printf("从现有数据库加载了 %d 个文档", len(documents))
-			return documents, nil
-		}
+// PrepareDatabase prepares the Milvus collection for the given repository.
+// It reads documents, generates embeddings, and inserts them into Milvus.
+func (dm *DatabaseManager) PrepareDatabase(repoURLOrPath string, accessToken string) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
 
-		log.Printf("加载现有数据库出错: %v", err)
-		// 继续创建新数据库
+	if err := dm.createRepo(repoURLOrPath, accessToken); err != nil {
+		return err
 	}
 
-	// 准备数据库
-	log.Println("创建新数据库...")
+	// Check if this repo has already been indexed in Milvus
+	// (We might need a way to track this, e.g., checking a few sample doc IDs)
+	// For now, we'll re-index every time, which is inefficient.
+	// A better approach would be incremental updates or checking existence.
+
+	log.Printf("Starting document processing for %s", dm.repoPaths["save_repo_dir"])
 	documents, err := dm.readAllDocuments(dm.repoPaths["save_repo_dir"])
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to read documents: %w", err)
 	}
 
-	// 处理文档 (分割和嵌入)
-	processedDocs, err := dm.processDocuments(documents)
+	log.Printf("Read %d documents. Generating embeddings and inserting into Milvus...", len(documents))
+	addedCount := 0
+	for _, doc := range documents {
+		if err := dm.addDocumentInternal(&doc); err != nil {
+			// Log error but continue processing other documents
+			log.Printf("Error adding document '%s' to Milvus: %v", doc.MetaData["file_path"], err)
+		} else {
+			addedCount++
+		}
+	}
+
+	// Ensure data is flushed
+	err = dm.milvusClient.Flush(context.Background(), collectionName, false)
 	if err != nil {
-		return nil, err
+		log.Printf("Warning: failed to flush collection '%s': %v", collectionName, err)
+		// Not returning error here, as inserts might still succeed later
 	}
 
-	// 保存到磁盘
-	if err := dm.saveDocumentsToFile(processedDocs, dm.repoPaths["save_db_file"]); err != nil {
-		log.Printf("保存数据库出错: %v", err)
-	}
-
-	log.Printf("总文档数: %d", len(processedDocs))
-	return processedDocs, nil
+	log.Printf("Finished processing. Added %d documents to Milvus for %s", addedCount, repoURLOrPath)
+	return nil
 }
 
-// fileExists 检查文件是否存在
+// addDocumentInternal adds a single document to Milvus (used internally by PrepareDatabase)
+// Assumes lock is already held if called from PrepareDatabase
+func (dm *DatabaseManager) addDocumentInternal(doc *models.Document) error {
+	ctx := context.Background()
+
+	// Generate embedding
+	embedding, err := dm.getEmbedding(doc.Text)
+	if err != nil {
+		return fmt.Errorf("failed to get embedding for '%s': %w", doc.MetaData["file_path"], err)
+	}
+
+	// Generate ID
+	filePath := doc.MetaData["file_path"].(string) // Assuming file_path exists and is string
+	docID := generateDocID(filePath)
+
+	// Prepare data for Milvus
+	idCol := entity.NewColumnInt64("doc_id", []int64{docID})
+	pathCol := entity.NewColumnVarChar("file_path", []string{filePath})
+	embeddingCol := entity.NewColumnFloatVector("embedding", embeddingDimension, [][]float32{embedding})
+	textCol := entity.NewColumnVarChar("raw_text", []string{doc.Text})
+
+	metadataBytes, err := json.Marshal(doc.MetaData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata for '%s': %w", filePath, err)
+	}
+	metadataCol := entity.NewColumnVarChar("metadata_json", []string{string(metadataBytes)})
+
+	_, err = dm.milvusClient.Insert(ctx, collectionName, "", idCol, pathCol, embeddingCol, textCol, metadataCol)
+	if err != nil {
+		return fmt.Errorf("failed to insert document '%s' (ID: %d) into Milvus: %w", filePath, docID, err)
+	}
+
+	return nil
+}
+
+// fileExists checks if a file exists
 func (dm *DatabaseManager) fileExists(filename string) bool {
 	info, err := os.Stat(filename)
 	if os.IsNotExist(err) {
@@ -174,22 +257,22 @@ func (dm *DatabaseManager) fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-// readAllDocuments 递归读取目录中的所有文档
+// readAllDocuments reads all documents from a directory
 func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, error) {
 	var documents []models.Document
 
-	// 要查找的文件扩展名，优先考虑代码文件
+	// Define file extensions to look for
 	codeExtensions := []string{".py", ".js", ".ts", ".java", ".cpp", ".c", ".go", ".rs",
 		".jsx", ".tsx", ".html", ".css", ".php", ".swift", ".cs"}
 	docExtensions := []string{".md", ".txt", ".rst", ".json", ".yaml", ".yml"}
 
-	// 获取排除的文件和目录
+	// Define excluded directories and files
 	excludedDirs := []string{".venv", "node_modules", ".git", "__pycache__"}
 	excludedFiles := []string{"package-lock.json", "yarn.lock"}
 
-	log.Printf("从 %s 读取文档", path)
+	log.Printf("Reading documents from %s", path)
 
-	// 处理代码文件
+	// Process code files
 	for _, ext := range codeExtensions {
 		files, err := utils.FindFiles(path, ext)
 		if err != nil {
@@ -197,7 +280,7 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 		}
 
 		for _, filePath := range files {
-			// 跳过排除的目录和文件
+			// Skip excluded directories and files
 			isExcluded := false
 			for _, excludedDir := range excludedDirs {
 				if strings.Contains(filePath, excludedDir) {
@@ -221,25 +304,25 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 
 			content, err := os.ReadFile(filePath)
 			if err != nil {
-				log.Printf("读取 %s 出错: %v", filePath, err)
+				log.Printf("Failed to read %s: %v", filePath, err)
 				continue
 			}
 
 			relativePath, err := filepath.Rel(path, filePath)
 			if err != nil {
-				log.Printf("获取相对路径出错: %v", err)
+				log.Printf("Failed to get relative path for %s: %v", filePath, err)
 				continue
 			}
 
-			// 确定这是否是实现文件
+			// Determine if this is an implementation file
 			isImplementation := !strings.HasPrefix(filepath.Base(relativePath), "test_") &&
 				!strings.HasPrefix(filepath.Base(relativePath), "app_") &&
 				!strings.Contains(strings.ToLower(relativePath), "test")
 
-			// 检查 token 数量
+			// Check token count
 			tokenCount := utils.CountTokens(string(content))
-			if tokenCount > 8192 { // 最大嵌入 token 限制
-				log.Printf("跳过大文件 %s: Token 数量 (%d) 超过限制", relativePath, tokenCount)
+			if tokenCount > 8192 { // Maximum embedding token limit
+				log.Printf("Skipping large file %s: Token count (%d) exceeds limit", relativePath, tokenCount)
 				continue
 			}
 
@@ -258,7 +341,7 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 		}
 	}
 
-	// 处理文档文件
+	// Process document files
 	for _, ext := range docExtensions {
 		files, err := utils.FindFiles(path, ext)
 		if err != nil {
@@ -266,7 +349,7 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 		}
 
 		for _, filePath := range files {
-			// 跳过排除的目录和文件
+			// Skip excluded directories and files
 			isExcluded := false
 			for _, excludedDir := range excludedDirs {
 				if strings.Contains(filePath, excludedDir) {
@@ -290,20 +373,20 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 
 			content, err := os.ReadFile(filePath)
 			if err != nil {
-				log.Printf("读取 %s 出错: %v", filePath, err)
+				log.Printf("Failed to read %s: %v", filePath, err)
 				continue
 			}
 
 			relativePath, err := filepath.Rel(path, filePath)
 			if err != nil {
-				log.Printf("获取相对路径出错: %v", err)
+				log.Printf("Failed to get relative path for %s: %v", filePath, err)
 				continue
 			}
 
-			// 检查 token 数量
+			// Check token count
 			tokenCount := utils.CountTokens(string(content))
-			if tokenCount > 8192 { // 最大嵌入 token 限制
-				log.Printf("跳过大文件 %s: Token 数量 (%d) 超过限制", relativePath, tokenCount)
+			if tokenCount > 8192 { // Maximum embedding token limit
+				log.Printf("Skipping large file %s: Token count (%d) exceeds limit", relativePath, tokenCount)
 				continue
 			}
 
@@ -322,236 +405,221 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 		}
 	}
 
-	log.Printf("找到 %d 个文档", len(documents))
+	log.Printf("Found %d documents", len(documents))
 	return documents, nil
 }
 
-// processDocuments 处理文档（分割和嵌入）
-func (dm *DatabaseManager) processDocuments(documents []models.Document) ([]models.Document, error) {
-	// 这里应该实现文本分割和嵌入
-	// 简化起见，我们假设已经处理好了文档
+// SearchDocuments searches Milvus for documents similar to the query.
+func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Document, error) {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+
+	if !dm.initialized {
+		return nil, errors.New("DatabaseManager not initialized")
+	}
+
+	ctx := context.Background()
+
+	// 1. Get query embedding
+	queryEmbedding, err := dm.getEmbedding(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get query embedding: %w", err)
+	}
+
+	// 2. Prepare search parameters
+	searchParam, _ := entity.NewIndexHNSWSearchParam(10) // ef parameter for HNSW
+	vector := []entity.Vector{entity.FloatVector(queryEmbedding)}
+
+	// 3. Perform search
+	log.Printf("Searching Milvus (topK=%d)...", topK)
+	searchResult, err := dm.milvusClient.Search(
+		ctx,            // context
+		collectionName, // Collection name
+		[]string{},     // Partition names (empty for all)
+		"",             // Filter expression (empty for none)
+		[]string{"file_path", "raw_text", "metadata_json"}, // Output fields
+		vector,      // Query vectors
+		"embedding", // Vector field name
+		entity.L2,   // Metric type
+		topK,        // Top K results
+		searchParam, // Search parameters
+	)
+	if err != nil {
+		return nil, fmt.Errorf("Milvus search failed: %w", err)
+	}
+
+	log.Printf("Milvus search returned %d results.", searchResult.ResultCount)
+
+	// 4. Process results
+	var documents []models.Document
+	filePathField, _ := searchResult.GetColumn("file_path")
+	rawTextField, _ := searchResult.GetColumn("raw_text")
+	metadataJSONField, _ := searchResult.GetColumn("metadata_json")
+
+	filePathData := filePathField.(*entity.ColumnVarChar)
+	rawTextData := rawTextField.(*entity.ColumnVarChar)
+	metadataJSONData := metadataJSONField.(*entity.ColumnVarChar)
+
+	for i := 0; i < searchResult.ResultCount; i++ {
+		filePath, _ := filePathData.ValueByIdx(i)
+		rawText, _ := rawTextData.ValueByIdx(i)
+		metadataJSON, _ := metadataJSONData.ValueByIdx(i)
+
+		var metadata map[string]interface{}
+		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+			log.Printf("Warning: failed to unmarshal metadata for '%s': %v", filePath, err)
+			metadata = make(map[string]interface{}) // Use empty map on error
+			metadata["error"] = "failed to parse stored metadata"
+			metadata["file_path"] = filePath // Ensure file_path is present
+		}
+
+		doc := models.Document{
+			// ID needs to be retrieved if required, or use file_path as identifier
+			Text:     rawText,
+			MetaData: metadata,
+			// Score: searchResult.Scores[i] // Access score if needed
+		}
+		documents = append(documents, doc)
+	}
+
 	return documents, nil
 }
 
-// saveDocumentsToFile 将文档保存到文件
-func (dm *DatabaseManager) saveDocumentsToFile(documents []models.Document, filePath string) error {
-	data, err := json.MarshalIndent(documents, "", "  ")
+// getEmbedding generates a placeholder embedding for text.
+// Replace this with your actual embedding model call.
+func (dm *DatabaseManager) getEmbedding(text string) ([]float32, error) {
+	// Placeholder: Generate a random vector
+	// In a real application, call your embedding model API (e.g., OpenAI, Sentence-Transformers)
+	vec := make([]float32, embeddingDimension)
+	for i := range vec {
+		vec[i] = rand.Float32()
+	}
+	// Normalize the vector (optional, but often recommended for cosine similarity)
+	var norm float32
+	for _, v := range vec {
+		norm += v * v
+	}
+	norm = float32(math.Sqrt(float64(norm)))
+	if norm > 0 {
+		for i := range vec {
+			vec[i] /= norm
+		}
+	}
+	return vec, nil
+}
+
+// AddDocument adds a single document to the Milvus database.
+// This is likely for adding documents outside the initial batch indexing.
+func (dm *DatabaseManager) AddDocument(doc *models.Document) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	if !dm.initialized {
+		return errors.New("DatabaseManager not initialized")
+	}
+
+	err := dm.addDocumentInternal(doc)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(filePath, data, 0644)
-}
-
-// loadDocumentsFromFile 从文件加载文档
-func (dm *DatabaseManager) loadDocumentsFromFile(filePath string) ([]models.Document, error) {
-	data, err := os.ReadFile(filePath)
+	// Flush immediately after single add for consistency?
+	err = dm.milvusClient.Flush(context.Background(), collectionName, false)
 	if err != nil {
-		return nil, err
+		log.Printf("Warning: failed to flush collection '%s' after single add: %v", collectionName, err)
 	}
 
-	var documents []models.Document
-	if err := json.Unmarshal(data, &documents); err != nil {
-		return nil, err
-	}
-
-	return documents, nil
+	log.Printf("Added single document '%s' to Milvus.", doc.MetaData["file_path"])
+	return nil
 }
 
-// DocScore 存储文档及其相关性分数
-type DocScore struct {
-	Doc   models.Document
-	Score float64
+// GetDocument retrieves a document by its identifier (e.g., file path).
+// Note: This searches based on the file_path field, not the primary key directly.
+func (dm *DatabaseManager) GetDocument(filePath string) (*models.Document, error) {
+	dm.mu.RLock()
+	defer dm.mu.RUnlock()
+
+	if !dm.initialized {
+		return nil, errors.New("DatabaseManager not initialized")
+	}
+
+	ctx := context.Background()
+	docID := generateDocID(filePath)
+
+	// Query Milvus by primary key (doc_id)
+	log.Printf("Querying Milvus for doc_id: %d (path: %s)", docID, filePath)
+	results, err := dm.milvusClient.Query(
+		ctx,
+		collectionName,
+		[]string{},                         // No partition names
+		fmt.Sprintf("doc_id == %d", docID), // Filter expression by primary key
+		[]string{"file_path", "raw_text", "metadata_json"}, // Output fields
+	)
+	if err != nil {
+		return nil, fmt.Errorf("Milvus query for ID %d failed: %w", docID, err)
+	}
+
+	if results.ResultCount == 0 {
+		return nil, fmt.Errorf("document with path '%s' (ID: %d) not found in Milvus", filePath, docID)
+	}
+
+	// Should only be one result for a primary key query
+	rawTextField, _ := results.GetColumn("raw_text")
+	metadataJSONField, _ := results.GetColumn("metadata_json")
+
+	rawTextData := rawTextField.(*entity.ColumnVarChar)
+	metadataJSONData := metadataJSONField.(*entity.ColumnVarChar)
+
+	rawText, _ := rawTextData.ValueByIdx(0)
+	metadataJSON, _ := metadataJSONData.ValueByIdx(0)
+
+	var metadata map[string]interface{}
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		log.Printf("Warning: failed to unmarshal metadata for '%s': %v", filePath, err)
+		metadata = make(map[string]interface{})
+		metadata["error"] = "failed to parse stored metadata"
+		metadata["file_path"] = filePath
+	}
+
+	doc := &models.Document{
+		Text:     rawText,
+		MetaData: metadata,
+	}
+
+	return doc, nil
 }
 
-// SearchDocuments 搜索与查询相关的文档
-func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Document, error) {
-	// 加载数据库
-	if len(dm.db) == 0 {
-		if dm.repoPaths != nil && dm.fileExists(dm.repoPaths["save_db_file"]) {
-			docs, err := dm.loadDocumentsFromFile(dm.repoPaths["save_db_file"])
-			if err != nil {
-				return nil, err
-			}
-			for i, doc := range docs {
-				dm.db[fmt.Sprintf("doc_%d", i)] = doc
-			}
-		} else {
-			return nil, errors.New("数据库为空，无法执行搜索")
-		}
+// DeleteDocument removes a document by its identifier (e.g., file path).
+func (dm *DatabaseManager) DeleteDocument(filePath string) error {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
+	if !dm.initialized {
+		return errors.New("DatabaseManager not initialized")
 	}
 
-	// 使用改进的相似度搜索算法
-	scored := dm.scoreDocumentsForQuery(query)
+	ctx := context.Background()
+	docID := generateDocID(filePath)
 
-	// 按分数排序
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].Score > scored[j].Score
-	})
-
-	// 返回前 topK 个文档
-	var result []models.Document
-	for i := 0; i < len(scored) && i < topK; i++ {
-		result = append(result, scored[i].Doc)
+	// Delete from Milvus by primary key (doc_id)
+	log.Printf("Deleting document from Milvus with doc_id: %d (path: %s)", docID, filePath)
+	_, err := dm.milvusClient.Delete(
+		ctx,
+		collectionName,
+		"",                                 // No partition names
+		fmt.Sprintf("doc_id == %d", docID), // Filter expression by primary key
+	)
+	if err != nil {
+		return fmt.Errorf("Milvus delete for ID %d (path: '%s') failed: %w", docID, filePath, err)
 	}
 
-	return result, nil
-}
+	log.Printf("Successfully deleted document '%s' (ID: %d) from Milvus.", filePath, docID)
 
-// scoreDocumentsForQuery 为查询对文档进行评分
-func (dm *DatabaseManager) scoreDocumentsForQuery(query string) []DocScore {
-	var scored []DocScore
-	queryLower := strings.ToLower(query)
-	queryWords := tokenizeText(queryLower)
-
-	// 文档频率计算
-	docFreq := make(map[string]int)
-	for _, doc := range dm.db {
-		docWords := tokenizeText(strings.ToLower(doc.Text))
-		seenWords := make(map[string]bool)
-
-		for word := range docWords {
-			if !seenWords[word] {
-				docFreq[word]++
-				seenWords[word] = true
-			}
-		}
+	// Optionally flush immediately
+	err = dm.milvusClient.Flush(context.Background(), collectionName, false)
+	if err != nil {
+		log.Printf("Warning: failed to flush collection '%s' after delete: %v", collectionName, err)
 	}
 
-	totalDocs := float64(len(dm.db))
-
-	// 对每个文档打分
-	for _, doc := range dm.db {
-		// 基本分数由以下因素决定：
-		// 1. TF-IDF 匹配分数
-		// 2. 标题匹配分数
-		// 3. 重要性修正
-
-		// 计算 TF-IDF 分数
-		textLower := strings.ToLower(doc.Text)
-		docWords := tokenizeText(textLower)
-		titleWords := tokenizeText(strings.ToLower(doc.Title))
-
-		var tfidfScore float64
-		var titleMatchScore float64
-
-		// TF-IDF 计算
-		for qWord := range queryWords {
-			if len(qWord) <= 1 { // 忽略太短的单词
-				continue
-			}
-
-			// 计算词频 (TF)
-			tf := float64(docWords[qWord]) / float64(len(textLower))
-
-			// 计算逆文档频率 (IDF)
-			var idf float64
-			if df, ok := docFreq[qWord]; ok && df > 0 {
-				idf = math.Log(totalDocs / float64(df))
-			}
-
-			// TF-IDF 分数
-			tfidfScore += tf * idf
-
-			// 标题匹配分数 (更高权重)
-			if titleWords[qWord] > 0 {
-				titleMatchScore += 2.0 * float64(titleWords[qWord]) / float64(len(doc.Title))
-			}
-		}
-
-		// 基础相似度分数
-		score := tfidfScore + titleMatchScore
-
-		// 考虑文档重要性
-		if doc.Importance == "high" {
-			score *= 1.5
-		} else if doc.Importance == "medium" {
-			score *= 1.2
-		}
-
-		// 额外考虑完整短语匹配
-		if strings.Contains(textLower, queryLower) {
-			score += 5.0 // 完整短语匹配奖励
-		}
-
-		// 标题完整匹配额外奖励
-		if strings.Contains(strings.ToLower(doc.Title), queryLower) {
-			score += 10.0
-		}
-
-		if score > 0 {
-			scored = append(scored, DocScore{Doc: doc, Score: score})
-		}
-	}
-
-	return scored
-}
-
-// tokenizeText 将文本分词并计算词频
-func tokenizeText(text string) map[string]int {
-	words := strings.Fields(text)
-	wordFreq := make(map[string]int)
-
-	// 停用词列表
-	stopWords := map[string]bool{
-		"的": true, "了": true, "和": true, "是": true, "在": true,
-		"这": true, "有": true, "我": true, "们": true, "为": true,
-		"the": true, "a": true, "an": true, "in": true, "on": true,
-		"at": true, "to": true, "for": true, "with": true, "by": true,
-		"of": true, "and": true, "or": true, "is": true, "are": true,
-	}
-
-	// 计算词频
-	for _, word := range words {
-		// 清理词汇
-		word = strings.ToLower(strings.Trim(word, ",.!?;:\"'()[]{}"))
-		if word != "" && !stopWords[word] {
-			wordFreq[word]++
-		}
-	}
-
-	return wordFreq
-}
-
-// AddDocument 添加文档到数据库
-func (dm *DatabaseManager) AddDocument(doc *models.Document) error {
-	if doc.ID == "" {
-		doc.ID = fmt.Sprintf("doc_%d", len(dm.db))
-	}
-
-	dm.db[doc.ID] = *doc
-
-	// 保存更新后的数据库到文件
-	documents := make([]models.Document, 0, len(dm.db))
-	for _, d := range dm.db {
-		documents = append(documents, d)
-	}
-
-	return dm.saveDocumentsToFile(documents, dm.repoPaths["save_db_file"])
-}
-
-// GetDocument 获取文档
-func (dm *DatabaseManager) GetDocument(id string) (*models.Document, error) {
-	doc, exists := dm.db[id]
-	if !exists {
-		return nil, fmt.Errorf("文档 ID %s 不存在", id)
-	}
-	return &doc, nil
-}
-
-// DeleteDocument 删除文档
-func (dm *DatabaseManager) DeleteDocument(id string) error {
-	if _, exists := dm.db[id]; !exists {
-		return fmt.Errorf("文档 ID %s 不存在", id)
-	}
-
-	delete(dm.db, id)
-
-	// 保存更新后的数据库到文件
-	documents := make([]models.Document, 0, len(dm.db))
-	for _, d := range dm.db {
-		documents = append(documents, d)
-	}
-
-	return dm.saveDocumentsToFile(documents, dm.repoPaths["save_db_file"])
+	return nil
 }

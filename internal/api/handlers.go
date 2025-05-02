@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -40,7 +41,7 @@ func NewServer(cfg *config.Config) *Server {
 	googleRAG := rag.NewGoogleRAG(cfg)
 	if err := manager.RegisterProvider(googleRAG); err != nil {
 		// 记录错误但继续运行，因为我们可能还有其他提供者
-		fmt.Printf("注册 Google RAG 提供者失败: %v\n", err)
+		log.Printf("注册 Google RAG 提供者失败: %v\n", err)
 	}
 
 	s := &Server{
@@ -53,6 +54,45 @@ func NewServer(cfg *config.Config) *Server {
 	s.setupRoutes()
 
 	return s
+}
+
+// 文件上传接口，支持 PDF、图片、Markdown
+func (s *Server) UploadHandler(c *gin.Context) {
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(400, gin.H{"error": "No file uploaded"})
+		return
+	}
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to open file"})
+		return
+	}
+	defer src.Close()
+
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	var content string
+	switch ext {
+	case ".pdf":
+		content, err = ExtractTextFromPDF(src)
+	case ".md":
+		content, err = ExtractTextFromMarkdown(src)
+	case ".jpg", ".jpeg", ".png":
+		content, err = ExtractTextFromImage(src)
+	default:
+		c.JSON(400, gin.H{"error": "Unsupported file type"})
+		return
+	}
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to extract content"})
+		return
+	}
+
+	// TODO: 调用 embedding/vectorizer，将 content 入库
+	c.JSON(200, gin.H{
+		"filename": file.Filename,
+		"content":  content[:min(200, len(content))], // 返回前200字
+	})
 }
 
 // setupRoutes 注册API路由
