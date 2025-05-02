@@ -1,0 +1,35 @@
+jwt:
+  expirationHours: 24
+
+rateLimiter:
+  rate: 1
+  capacity: 10
+  windowSize: 60
+  maxRequests: 60
+
+redis:
+  address: localhost:6379
+  db: 0
+
+server:
+  port: "8080"
+  # jwt_secret: "your-secret-key" # Uncomment and set a real secret
+
+google:
+  api_key: "YOUR_GOOGLE_API_KEY" # Replace with your actual key
+  project_id: "your-google-project-id" # Replace with your Project ID
+  location: "us-central1" # e.g., us-central1
+  embedding_model: "textembedding-gecko@001"
+
+retriever:
+  type: "google" # or other types like "local"
+  top_k: 5
+
+db:
+  type: "json" # or "sqlite", "postgres", etc.
+  path: "./data/deepwiki_db.json" # Path for JSON or SQLite file
+  # connection_string: "user=... password=... dbname=... sslmode=disable" # For Postgres, etc.
+
+logging:
+  level: "info" # debug, info, warn, error
+  format: "text" # text or json

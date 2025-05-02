@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -98,11 +99,9 @@ func (s *Server) setupRoutes() {
 
 // Start 启动服务器
 func (s *Server) Start() error {
-	port := s.config.Port
-	if port == "" {
-		port = "8001"
-	}
-	return s.router.Run(":" + port)
+	addr := ":" + s.config.Server.Port
+	log.Printf("Server starting on %s", addr)
+	return s.router.Run(addr)
 }
 
 // handleRoot 处理根路径

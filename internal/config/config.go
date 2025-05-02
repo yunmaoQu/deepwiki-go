@@ -1,61 +1,107 @@
 package config
 
-import "os"
+import (
+	"os"
+	"log"
 
-// Config 保存应用程序配置
-type Config struct {
-        GoogleAPIKey string
-        OpenAIAPIKey string
-        ProjectID    string // Google Cloud 项目 ID
-        Location     string // Google Cloud 区域
-        Port         string
-        
-        // 文本分割器配置
-        TextSplitter struct {
-                SplitBy      string
-                ChunkSize    int
-                ChunkOverlap int
-        }
-        
-        // 检索器配置
-        Retriever struct {
-                TopK int
-        }
-        
-        // 排除的目录和文件
-        FileFilters struct {
-                ExcludedDirs  []string
-                ExcludedFiles []string
-        }
+	"gopkg.in/yaml.v3"
+)
+
+// ServerConfig holds server-related configuration
+type ServerConfig struct {
+	Port     string `yaml:"port"`
+	JWTSecret string `yaml:"jwt_secret,omitempty"` // Optional JWT secret
 }
 
-// NewConfig 创建并返回一个新的配置实例
-func NewConfig() *Config {
-        cfg := &Config{
-                GoogleAPIKey: os.Getenv("GOOGLE_API_KEY"),
-                OpenAIAPIKey: os.Getenv("OPENAI_API_KEY"),
-                ProjectID:    os.Getenv("GOOGLE_CLOUD_PROJECT"),
-                Location:     os.Getenv("GOOGLE_CLOUD_LOCATION"),
-                Port:         os.Getenv("PORT"),
-        }
-        
-        // 设置默认值
-        cfg.TextSplitter.SplitBy = "word"
-        cfg.TextSplitter.ChunkSize = 350
-        cfg.TextSplitter.ChunkOverlap = 100
-        
-        cfg.Retriever.TopK = 20
-        
-        // 设置默认排除的目录和文件
-        cfg.FileFilters.ExcludedDirs = []string{
-                ".venv", "venv", "node_modules", ".git", "__pycache__",
-                ".pytest_cache", "dist", "build", "docs", ".idea", ".vscode",
-        }
-        
-        cfg.FileFilters.ExcludedFiles = []string{
-                "package-lock.json", "yarn.lock", "poetry.lock", "Pipfile.lock",
-                ".DS_Store", "Thumbs.db", ".env", ".gitignore",
-        }
-        
-        return cfg
+// GoogleConfig holds Google Cloud related configuration
+type GoogleConfig struct {
+	APIKey         string `yaml:"api_key"`
+	ProjectID      string `yaml:"project_id"`
+	Location       string `yaml:"location"`
+	EmbeddingModel string `yaml:"embedding_model"`
+}
+
+// RetrieverConfig holds retriever configuration
+type RetrieverConfig struct {
+	Type string `yaml:"type"`
+	TopK int    `yaml:"top_k"`
+}
+
+// DBConfig holds database configuration
+type DBConfig struct {
+	Type             string `yaml:"type"`
+	Path             string `yaml:"path,omitempty"` // Used for file-based DBs like JSON, SQLite
+	ConnectionString string `yaml:"connection_string,omitempty"` // Used for server-based DBs like Postgres
+}
+
+// LoggingConfig holds logging configuration
+type LoggingConfig struct {
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"`
+}
+
+// TextSplitterConfig holds text splitter configuration
+type TextSplitterConfig struct {
+	SplitBy      string `yaml:"split_by"`
+	ChunkSize    int    `yaml:"chunk_size"`
+	ChunkOverlap int    `yaml:"chunk_overlap"`
+}
+
+// FileFiltersConfig holds file filters configuration
+type FileFiltersConfig struct {
+	ExcludedDirs  []string `yaml:"excluded_dirs"`
+	ExcludedFiles []string `yaml:"excluded_files"`
+}
+
+// Config holds the overall application configuration
+type Config struct {
+	Server       ServerConfig       `yaml:"server"`
+	Google       GoogleConfig       `yaml:"google"`
+	Retriever    RetrieverConfig    `yaml:"retriever"`
+	DB           DBConfig           `yaml:"db"`
+	Logging      LoggingConfig      `yaml:"logging"`
+	TextSplitter TextSplitterConfig `yaml:"text_splitter"`
+	FileFilters  FileFiltersConfig  `yaml:"file_filters"`
+	OpenAIAPIKey string             `yaml:"openai_api_key"`
+}
+
+// LoadConfig loads configuration from a YAML file
+func LoadConfig(configPath string) (*Config, error) {
+	config := &Config{}
+
+	// Default path if not provided
+	if configPath == "" {
+		configPath = "internal/config/config.yaml" // Or determine dynamically
+	}
+
+	log.Printf("Loading configuration from: %s", configPath)
+
+	// Read the YAML file
+	yamlFile, err := os.ReadFile(configPath)
+	if err != nil {
+		log.Printf("Error reading config file %s: %v", configPath, err)
+		return nil, err
+	}
+
+	// Parse the YAML file
+	err = yaml.Unmarshal(yamlFile, config)
+	if err != nil {
+		log.Printf("Error parsing config file %s: %v", configPath, err)
+		return nil, err
+	}
+
+	// Optional: Override with environment variables (example for server port)
+	if portEnv := os.Getenv("SERVER_PORT"); portEnv != "" {
+		config.Server.Port = portEnv
+	}
+	if apiKeyEnv := os.Getenv("GOOGLE_API_KEY"); apiKeyEnv != "" {
+		config.Google.APIKey = apiKeyEnv
+	}
+	if openAIAPIKeyEnv := os.Getenv("OPENAI_API_KEY"); openAIAPIKeyEnv != "" {
+		config.OpenAIAPIKey = openAIAPIKeyEnv
+	}
+    // Add more environment variable overrides as needed
+
+	log.Println("Configuration loaded successfully")
+	return config, nil
 }

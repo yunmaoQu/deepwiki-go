@@ -43,12 +43,12 @@ func (r *GoogleRAG) Name() string {
 // Initialize 初始化提供者
 func (r *GoogleRAG) Initialize() error {
 	// 初始化 Google 生成式 AI 客户端
-	if r.Config.GoogleAPIKey == "" || r.Config.ProjectID == "" {
+	if r.Config.Google.APIKey == "" || r.Config.Google.ProjectID == "" {
 		return fmt.Errorf("缺少必要的 Google AI 配置")
 	}
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, r.Config.ProjectID, r.Config.Location)
+	client, err := genai.NewClient(ctx, r.Config.Google.ProjectID, r.Config.Google.Location)
 	if err != nil {
 		return fmt.Errorf("初始化 Google AI 客户端失败: %v", err)
 	}
