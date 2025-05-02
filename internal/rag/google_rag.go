@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sort"
+	"strings"
 
 	"github.com/deepwiki-go/internal/config"
 	"github.com/deepwiki-go/internal/data"
@@ -67,6 +69,46 @@ func (r *GoogleRAG) PrepareRetriever(repoURLOrPath string, accessToken string) e
 	return nil
 }
 
+// IndexDocument 索引文档
+func (r *GoogleRAG) IndexDocument(doc *models.Document) error {
+	// 将文档添加到数据库
+	if err := r.DbManager.AddDocument(doc); err != nil {
+		return fmt.Errorf("添加文档到数据库失败: %v", err)
+	}
+
+	// 更新内存中的文档列表
+	r.Documents = append(r.Documents, *doc)
+	return nil
+}
+
+// GetDocument 获取文档
+func (r *GoogleRAG) GetDocument(id string) (*models.Document, error) {
+	// 从数据库中获取文档
+	doc, err := r.DbManager.GetDocument(id)
+	if err != nil {
+		return nil, fmt.Errorf("从数据库获取文档失败: %v", err)
+	}
+	return doc, nil
+}
+
+// DeleteDocument 删除文档
+func (r *GoogleRAG) DeleteDocument(id string) error {
+	// 从数据库中删除文档
+	if err := r.DbManager.DeleteDocument(id); err != nil {
+		return fmt.Errorf("从数据库删除文档失败: %v", err)
+	}
+
+	// 更新内存中的文档列表
+	for i, doc := range r.Documents {
+		if doc.ID == id {
+			// 从切片中删除该文档
+			r.Documents = append(r.Documents[:i], r.Documents[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
 // RetrieveDocuments 检索与查询相关的文档
 func (r *GoogleRAG) RetrieveDocuments(query string) ([]models.Document, error) {
 	if len(r.Documents) == 0 {
@@ -79,7 +121,107 @@ func (r *GoogleRAG) RetrieveDocuments(query string) ([]models.Document, error) {
 		return nil, err
 	}
 
+	// 使用上下文历史记录增强检索结果
+	if relevantDocs, err = r.enhanceRetrievalWithMemory(query, relevantDocs); err != nil {
+		log.Printf("增强检索结果时出错: %v", err)
+		// 继续使用原始结果
+	}
+
 	return relevantDocs, nil
+}
+
+// enhanceRetrievalWithMemory 使用上下文历史记录增强检索结果
+func (r *GoogleRAG) enhanceRetrievalWithMemory(query string, docs []models.Document) ([]models.Document, error) {
+	// 从记忆中获取相关上下文
+	context := r.Memory.GetRelevantContext(query)
+	if context == "" {
+		return docs, nil // 没有相关上下文，使用原始结果
+	}
+
+	// 使用上下文重新排序文档
+	enhancedDocs := r.reRankDocumentsWithContext(docs, context)
+
+	return enhancedDocs, nil
+}
+
+// reRankDocumentsWithContext 使用上下文重新排序文档
+func (r *GoogleRAG) reRankDocumentsWithContext(docs []models.Document, context string) []models.Document {
+	// 创建一个文档副本进行排序
+	result := make([]models.Document, len(docs))
+	copy(result, docs)
+
+	// 使用上下文相关性对文档进行排序
+	// 这里使用简单的启发式方法：检查文档内容是否包含上下文中的关键词
+	contextKeywords := extractKeywords(context)
+
+	// 计算每个文档的上下文相关性分数
+	type scoredDoc struct {
+		doc   models.Document
+		score float64
+	}
+
+	scoredDocs := make([]scoredDoc, len(result))
+	for i, doc := range result {
+		scoredDocs[i] = scoredDoc{
+			doc:   doc,
+			score: calculateContextScore(doc, contextKeywords),
+		}
+	}
+
+	// 根据分数排序
+	sort.Slice(scoredDocs, func(i, j int) bool {
+		return scoredDocs[i].score > scoredDocs[j].score
+	})
+
+	// 转换回文档列表
+	for i, sd := range scoredDocs {
+		result[i] = sd.doc
+	}
+
+	return result
+}
+
+// calculateContextScore 计算文档与上下文的相关性分数
+func calculateContextScore(doc models.Document, contextKeywords []string) float64 {
+	score := 0.0
+
+	// 简单的关键词匹配
+	for _, keyword := range contextKeywords {
+		if strings.Contains(strings.ToLower(doc.Text), strings.ToLower(keyword)) {
+			score += 1.0
+		}
+		if strings.Contains(strings.ToLower(doc.Title), strings.ToLower(keyword)) {
+			score += 2.0 // 标题匹配权重更高
+		}
+	}
+
+	// 如果文档被标记为重要，增加其分数
+	if doc.Importance == "high" {
+		score *= 1.5
+	}
+
+	return score
+}
+
+// extractKeywords 从文本中提取关键词
+func extractKeywords(text string) []string {
+	// 移除常见停用词并分割文本
+	stopWords := map[string]bool{
+		"的": true, "了": true, "和": true, "是": true, "在": true,
+		"这": true, "有": true, "我": true, "们": true, "为": true,
+	}
+
+	words := strings.Fields(text)
+	var keywords []string
+
+	for _, word := range words {
+		word = strings.ToLower(strings.Trim(word, ",.!?;:\"'()[]{}"))
+		if word != "" && !stopWords[word] && len(word) > 1 {
+			keywords = append(keywords, word)
+		}
+	}
+
+	return keywords
 }
 
 // GenerateStreamingResponse 生成流式响应
@@ -102,14 +244,14 @@ func (r *GoogleRAG) GenerateStreamingResponse(prompt string) (chan string, error
 		topP := float32(0.8)
 		topK := int32(40)
 		maxTokens := int32(2048)
-		
+
 		// 创建生成请求
 		model := r.GoogleClient.GenerativeModel("gemini-1.0-pro")
 		model.Temperature = &temperature
 		model.TopP = &topP
 		model.TopK = &topK
 		model.MaxOutputTokens = &maxTokens
-		
+
 		iter := model.GenerateContentStream(ctx, genai.Text(prompt))
 
 		// 流式传输响应

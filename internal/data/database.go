@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -357,13 +358,16 @@ func (dm *DatabaseManager) loadDocumentsFromFile(filePath string) ([]models.Docu
 	return documents, nil
 }
 
+// DocScore 存储文档及其相关性分数
+type DocScore struct {
+	Doc   models.Document
+	Score float64
+}
+
 // SearchDocuments 搜索与查询相关的文档
 func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Document, error) {
-	// 在实际实现中，这里应该使用向量搜索来查找相关文档
-	// 简化起见，我们使用基于关键词的简单搜索
-
+	// 加载数据库
 	if len(dm.db) == 0 {
-		// 尝试加载文档
 		if dm.repoPaths != nil && dm.fileExists(dm.repoPaths["save_db_file"]) {
 			docs, err := dm.loadDocumentsFromFile(dm.repoPaths["save_db_file"])
 			if err != nil {
@@ -377,29 +381,8 @@ func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Doc
 		}
 	}
 
-	// 简单的关键词匹配搜索
-	type DocScore struct {
-		Doc   models.Document
-		Score int
-	}
-
-	var scored []DocScore
-	keywords := strings.Fields(strings.ToLower(query))
-
-	for _, doc := range dm.db {
-		score := 0
-		text := strings.ToLower(doc.Text)
-
-		for _, keyword := range keywords {
-			if strings.Contains(text, keyword) {
-				score += strings.Count(text, keyword)
-			}
-		}
-
-		if score > 0 {
-			scored = append(scored, DocScore{Doc: doc, Score: score})
-		}
-	}
+	// 使用改进的相似度搜索算法
+	scored := dm.scoreDocumentsForQuery(query)
 
 	// 按分数排序
 	sort.Slice(scored, func(i, j int) bool {
@@ -413,4 +396,162 @@ func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Doc
 	}
 
 	return result, nil
+}
+
+// scoreDocumentsForQuery 为查询对文档进行评分
+func (dm *DatabaseManager) scoreDocumentsForQuery(query string) []DocScore {
+	var scored []DocScore
+	queryLower := strings.ToLower(query)
+	queryWords := tokenizeText(queryLower)
+
+	// 文档频率计算
+	docFreq := make(map[string]int)
+	for _, doc := range dm.db {
+		docWords := tokenizeText(strings.ToLower(doc.Text))
+		seenWords := make(map[string]bool)
+
+		for word := range docWords {
+			if !seenWords[word] {
+				docFreq[word]++
+				seenWords[word] = true
+			}
+		}
+	}
+
+	totalDocs := float64(len(dm.db))
+
+	// 对每个文档打分
+	for _, doc := range dm.db {
+		// 基本分数由以下因素决定：
+		// 1. TF-IDF 匹配分数
+		// 2. 标题匹配分数
+		// 3. 重要性修正
+
+		// 计算 TF-IDF 分数
+		textLower := strings.ToLower(doc.Text)
+		docWords := tokenizeText(textLower)
+		titleWords := tokenizeText(strings.ToLower(doc.Title))
+
+		var tfidfScore float64
+		var titleMatchScore float64
+
+		// TF-IDF 计算
+		for qWord := range queryWords {
+			if len(qWord) <= 1 { // 忽略太短的单词
+				continue
+			}
+
+			// 计算词频 (TF)
+			tf := float64(docWords[qWord]) / float64(len(textLower))
+
+			// 计算逆文档频率 (IDF)
+			var idf float64
+			if df, ok := docFreq[qWord]; ok && df > 0 {
+				idf = math.Log(totalDocs / float64(df))
+			}
+
+			// TF-IDF 分数
+			tfidfScore += tf * idf
+
+			// 标题匹配分数 (更高权重)
+			if titleWords[qWord] > 0 {
+				titleMatchScore += 2.0 * float64(titleWords[qWord]) / float64(len(doc.Title))
+			}
+		}
+
+		// 基础相似度分数
+		score := tfidfScore + titleMatchScore
+
+		// 考虑文档重要性
+		if doc.Importance == "high" {
+			score *= 1.5
+		} else if doc.Importance == "medium" {
+			score *= 1.2
+		}
+
+		// 额外考虑完整短语匹配
+		if strings.Contains(textLower, queryLower) {
+			score += 5.0 // 完整短语匹配奖励
+		}
+
+		// 标题完整匹配额外奖励
+		if strings.Contains(strings.ToLower(doc.Title), queryLower) {
+			score += 10.0
+		}
+
+		if score > 0 {
+			scored = append(scored, DocScore{Doc: doc, Score: score})
+		}
+	}
+
+	return scored
+}
+
+// tokenizeText 将文本分词并计算词频
+func tokenizeText(text string) map[string]int {
+	words := strings.Fields(text)
+	wordFreq := make(map[string]int)
+
+	// 停用词列表
+	stopWords := map[string]bool{
+		"的": true, "了": true, "和": true, "是": true, "在": true,
+		"这": true, "有": true, "我": true, "们": true, "为": true,
+		"the": true, "a": true, "an": true, "in": true, "on": true,
+		"at": true, "to": true, "for": true, "with": true, "by": true,
+		"of": true, "and": true, "or": true, "is": true, "are": true,
+	}
+
+	// 计算词频
+	for _, word := range words {
+		// 清理词汇
+		word = strings.ToLower(strings.Trim(word, ",.!?;:\"'()[]{}"))
+		if word != "" && !stopWords[word] {
+			wordFreq[word]++
+		}
+	}
+
+	return wordFreq
+}
+
+// AddDocument 添加文档到数据库
+func (dm *DatabaseManager) AddDocument(doc *models.Document) error {
+	if doc.ID == "" {
+		doc.ID = fmt.Sprintf("doc_%d", len(dm.db))
+	}
+
+	dm.db[doc.ID] = *doc
+
+	// 保存更新后的数据库到文件
+	documents := make([]models.Document, 0, len(dm.db))
+	for _, d := range dm.db {
+		documents = append(documents, d)
+	}
+
+	return dm.saveDocumentsToFile(documents, dm.repoPaths["save_db_file"])
+}
+
+// GetDocument 获取文档
+func (dm *DatabaseManager) GetDocument(id string) (*models.Document, error) {
+	doc, exists := dm.db[id]
+	if !exists {
+		return nil, fmt.Errorf("文档 ID %s 不存在", id)
+	}
+	return &doc, nil
+}
+
+// DeleteDocument 删除文档
+func (dm *DatabaseManager) DeleteDocument(id string) error {
+	if _, exists := dm.db[id]; !exists {
+		return fmt.Errorf("文档 ID %s 不存在", id)
+	}
+
+	delete(dm.db, id)
+
+	// 保存更新后的数据库到文件
+	documents := make([]models.Document, 0, len(dm.db))
+	for _, d := range dm.db {
+		documents = append(documents, d)
+	}
+
+	return dm.saveDocumentsToFile(documents, dm.repoPaths["save_db_file"])
 }

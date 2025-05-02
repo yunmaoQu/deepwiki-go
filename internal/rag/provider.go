@@ -19,6 +19,12 @@ type RAGProvider interface {
 	RetrieveDocuments(query string) ([]models.Document, error)
 	// GenerateStreamingResponse 生成流式响应
 	GenerateStreamingResponse(prompt string) (chan string, error)
+	// IndexDocument 索引文档
+	IndexDocument(doc *models.Document) error
+	// GetDocument 获取文档
+	GetDocument(id string) (*models.Document, error)
+	// DeleteDocument 删除文档
+	DeleteDocument(id string) error
 	// Close 清理资源
 	Close() error
 }
