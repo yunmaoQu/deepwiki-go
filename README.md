@@ -1,98 +1,95 @@
 # DeepWiki-Go
 
-DeepWiki-Go是一个基于Go语言实现的代码知识库自动生成工具，它可以分析任何GitHub或GitLab代码仓库，并自动生成一个结构化、交互式的Wiki文档。
+DeepWiki-Go is an automatic code knowledge base generation tool implemented in Go. It can analyze any GitHub or GitLab code repository and automatically generate a structured, interactive Wiki document.
 
-## 🔍 核心功能
+## 🔍 Core Features
 
-- **代码库分析**：自动分析仓库结构和代码依赖关系
-- **Wiki自动生成**：生成模块介绍、架构说明和API文档
-- **可视化图表**：自动创建架构图和流程图以解释代码关系
-- **RAG搜索**：基于检索增强生成的智能代码搜索
-- **私有仓库支持**：支持通过访问令牌访问私有仓库
-- **多语言支持**：分析支持超过20种主流编程语言
+- **Code Repository Analysis**: Automatically analyze repository structure and code dependencies
+- **Wiki Auto-generation**: Generate module introductions, architecture documentation, and API documentation
+- **Visualization Charts**: Automatically create architecture diagrams and flowcharts to explain code relationships
+- **RAG Search**: Intelligent code search based on Retrieval-Augmented Generation
+- **Private Repository Support**: Support for accessing private repositories via access tokens
+- **Multi-language Support**: Analysis supports over 20 mainstream programming languages
 
-## 🛠️ 技术架构
+## 🛠️ Technical Architecture
 
 ```
 deepwiki-go/
-├── cmd/                  # 程序入口
-│   └── main.go           # 主程序入口
-├── internal/             # 内部应用代码
-│   ├── api/              # API服务器
-│   │   ├── handlers.go   # API处理器
-│   │   ├── middleware.go # 中间件
-│   │   └── routes.go     # 路由配置
-│   ├── config/           # 配置管理
-│   │   └── config.go     # 配置结构和初始化
-│   ├── data/             # 数据处理
-│   │   ├── database.go   # 数据库操作
-│   │   ├── embedding.go  # 文本嵌入处理
-│   │   ├── repository.go # 仓库管理
-│   │   └── storage.go    # 向量存储
-│   ├── models/           # 数据模型
-│   │   └── models.go     # 模型定义
-│   └── rag/              # 检索增强生成
-│       ├── memory.go     # 内存缓存
-│       └── rag.go        # RAG实现
-└── pkg/                  # 公共工具包
-    └── utils/            # 工具函数
-        ├── git.go        # Git操作
-        └── token.go      # 令牌处理
+├── cmd/                  # Program entry point
+│   └── main.go           # Main program entry
+├── internal/             # Internal application code
+│   ├── api/              # API server
+│   │   ├── handlers.go   # API handlers
+│   │   ├── middleware.go # Middleware
+│   │   └── routes.go     # Route configuration
+│   ├── config/           # Configuration management
+│   │   └── config.go     # Configuration structure and initialization
+│   ├── data/             # Data processing
+│   │   ├── database.go   # Database operations
+│   ├── models/           # Data models
+│   │   └── models.go     # Model definitions
+│   └── rag/              # Retrieval Augmented Generation
+│       ├── memory.go     # Memory cache
+│       └── rag.go        # RAG implementation
+└── pkg/                  # Public utilities
+    └── utils/            # Utility functions
+        ├── git.go        # Git operations
+        └── token.go      # Token handling
 ```
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 依赖条件
+### Prerequisites
 
 - Go 1.18+
 - Git
-- Google API密钥（用于AI生成）
-- OpenAI API密钥（用于文本嵌入）
+- Google API key (for AI generation)
+- OpenAI API key (for text embeddings)
 
-### 环境设置
+### Environment Setup
 
-1. 克隆仓库
+1. Clone the repository
 ```bash
 git clone https://github.com/yourusername/deepwiki-go.git
 cd deepwiki-go
 ```
 
-2. 创建`.env`文件
+2. Create a `.env` file
 ```
 GOOGLE_API_KEY=your_google_api_key
 OPENAI_API_KEY=your_openai_api_key
-PORT=8001  # 可选，默认为8001
+PORT=8001  # Optional, default is 8001
 ```
 
-### 构建和运行
+### Build and Run
 
-1. 构建应用
+1. Build the application
 ```bash
 go build -o deepwiki ./cmd/
 ```
 
-2. 运行应用
+2. Run the application
 ```bash
 ./deepwiki
 ```
 
-应用将在 http://localhost:8001 启动API服务器。
+The application will start the API server at http://localhost:8001.
 
-### Docker部署
+### Docker Deployment
 
-1. 构建Docker镜像
+1. Build Docker image
 ```bash
 docker build -t deepwiki-go .
 ```
 
-2. 运行容器
+2. Run container
 ```bash
 docker run -d -p 8001:8001 --env-file .env --name deepwiki deepwiki-go
 ```
 
-## 📝 API使用
+## 📝 API Usage
 
-### 生成Wiki
+### Generate Wiki
 
 ```bash
 curl -X POST http://localhost:8001/api/v1/wiki/generate \
@@ -100,18 +97,19 @@ curl -X POST http://localhost:8001/api/v1/wiki/generate \
   -d '{"repo_url": "https://github.com/username/repo", "github_token": "your_token"}'
 ```
 
-### 搜索文档
+### Search Documents
 
 ```bash
 curl -X POST http://localhost:8001/api/v1/vectors/search \
   -H "Content-Type: application/json" \
-  -d '{"query": "如何实现用户认证", "repo_url": "https://github.com/username/repo"}'
+  -d '{"query": "how to implement user authentication", "repo_url": "https://github.com/username/repo"}'
 ```
 
-## 🤝 贡献指南
+## 🤝 Contributing
 
-欢迎提交问题和Pull Request！请查看[贡献指南](CONTRIBUTING.md)了解更多信息。
+Issues and Pull Requests are welcome! Please check out the [Contributing Guide](CONTRIBUTING.md) for more information.
 
-## 📄 许可证
+## 📄 License
 
-本项目采用[MIT许可证](LICENSE)。
+This project is licensed under the [MIT License](LICENSE).
+
