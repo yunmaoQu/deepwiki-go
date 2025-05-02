@@ -1,3 +1,4 @@
+```
 deepwiki-go/
 ├── cmd/
 │   └── server/
@@ -24,3 +25,4 @@ deepwiki-go/
 │       └── files.go      # File handling
 ├── go.mod
 └── go.sum
+```
