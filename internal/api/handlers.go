@@ -2,341 +2,668 @@
 package api
 
 import (
-        "fmt"
-        "net/http"
-        "strings"
-        "time"
-        
-        "github.com/gin-gonic/gin"
-        "github.com/deepwiki-go/internal/data"
-        "github.com/deepwiki-go/internal/models"
-        "github.com/deepwiki-go/internal/rag"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+
+	"github.com/deepwiki-go/internal/config"
+	"github.com/deepwiki-go/internal/data"
+	"github.com/deepwiki-go/internal/models"
+	"github.com/deepwiki-go/internal/rag"
+	"github.com/gin-gonic/gin"
 )
 
-// 处理根端点
+// Server 表示API服务器
+type Server struct {
+	router  *gin.Engine
+	config  *config.Config
+	manager *rag.RAGManager
+}
+
+// NewServer 创建一个新的服务器实例
+func NewServer(cfg *config.Config) *Server {
+	router := gin.Default()
+
+	// 设置中间件
+	router.Use(LoggingMiddleware())
+	router.Use(CORSMiddleware())
+	router.Use(ErrorHandlerMiddleware())
+
+	// 初始化 RAG 管理器
+	manager := rag.NewRAGManager(cfg)
+
+	// 注册默认的 Google RAG 提供者
+	googleRAG := rag.NewGoogleRAG(cfg)
+	if err := manager.RegisterProvider(googleRAG); err != nil {
+		// 记录错误但继续运行，因为我们可能还有其他提供者
+		fmt.Printf("注册 Google RAG 提供者失败: %v\n", err)
+	}
+
+	s := &Server{
+		router:  router,
+		config:  cfg,
+		manager: manager,
+	}
+
+	// 注册路由
+	s.setupRoutes()
+
+	return s
+}
+
+// setupRoutes 注册API路由
+func (s *Server) setupRoutes() {
+	// 根端点
+	s.router.GET("/", s.handleRoot)
+
+	// 聊天完成端点
+	s.router.POST("/chat/completions/stream", s.handleChatCompletions)
+
+	// Wiki生成端点
+	s.router.POST("/wiki/generate", s.handleGenerateWiki)
+
+	// Wiki导出端点
+	s.router.POST("/wiki/export", s.handleExportWiki)
+
+	// 仓库分析端点
+	s.router.POST("/repo/analyze", s.handleAnalyzeRepo)
+}
+
+// Start 启动服务器
+func (s *Server) Start() error {
+	port := s.config.Port
+	if port == "" {
+		port = "8001"
+	}
+	return s.router.Run(":" + port)
+}
+
+// handleRoot 处理根路径
 func (s *Server) handleRoot(c *gin.Context) {
-        c.JSON(http.StatusOK, gin.H{
-                "message": "欢迎使用流式 API",
-                "version": "1.0.0",
-                "endpoints": gin.H{
-                        "Chat": []string{
-                                "POST /chat/completions/stream - 流式聊天完成",
-                        },
-                        "Wiki": []string{
-                                "POST /export/wiki - 以 Markdown 或 JSON 格式导出 wiki 内容",
-                        },
-                },
-        })
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"version": "1.0.0",
+		"name":    "DeepWiki-Go API",
+	})
 }
 
-// 处理聊天完成
+// handleChatCompletions 处理聊天完成请求
 func (s *Server) handleChatCompletions(c *gin.Context) {
-        var request models.ChatCompletionRequest
-        
-        if err := c.ShouldBindJSON(&request); err != nil {
-                c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效请求: %v", err)})
-                return
-        }
-        
-        // 验证请求
-        if request.RepoURL == "" {
-                c.JSON(http.StatusBadRequest, gin.H{"error": "仓库 URL 是必需的"})
-                return
-        }
-        
-        if len(request.Messages) == 0 {
-                c.JSON(http.StatusBadRequest, gin.H{"error": "未提供消息"})
-                return
-        }
-        
-        // 获取最后一条用户消息
-        lastMessage := request.Messages[len(request.Messages)-1]
-        if lastMessage.Role != "user" {
-                c.JSON(http.StatusBadRequest, gin.H{"error": "最后一条消息必须来自用户"})
-                return
-        }
-        
-        // 创建一个新的 RAG 实例
-        ragService := rag.NewRAG(s.config)
-        
-        // 确定使用哪个访问令牌
-        var accessToken string
-        if strings.Contains(request.RepoURL, "github.com") && request.GitHubToken != "" {
-                accessToken = request.GitHubToken
-        } else if strings.Contains(request.RepoURL, "gitlab.com") && request.GitLabToken != "" {
-                accessToken = request.GitLabToken
-        }
-        
-        // 准备检索器
-        err := ragService.PrepareRetriever(request.RepoURL, accessToken)
-        if err != nil {
-                c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("准备检索器时出错: %v", err)})
-                return
-        }
-        
-        // 设置流式响应
-        c.Header("Content-Type", "text/event-stream")
-        c.Header("Cache-Control", "no-cache")
-        c.Header("Connection", "keep-alive")
-        c.Header("Transfer-Encoding", "chunked")
-        
-        // 处理先前的消息以构建对话历史
-        for i := 0; i < len(request.Messages)-1; i += 2 {
-                if i+1 < len(request.Messages) {
-                        userMsg := request.Messages[i]
-                        assistantMsg := request.Messages[i+1]
-                        
-                        if userMsg.Role == "user" && assistantMsg.Role == "assistant" {
-                                ragService.Memory.AddDialogTurn(userMsg.Content, assistantMsg.Content)
-                        }
-                }
-        }
-        
-        // 获取查询
-        query := lastMessage.Content
-        
-        // 初始化响应通道
-        clientGone := c.Request.Context().Done()
-        
-        // 启动 goroutine 来处理生成和流式传输
-        go func() {
-                // 处理文件内容（如果提供）
-                fileContent := ""
-                if request.FilePath != "" {
-                        content, err := data.GetFileContent(request.RepoURL, request.FilePath, accessToken)
-                        if err == nil {
-                                fileContent = content
-                        }
-                }
-                
-                // 获取相关文档
-                contextDocs, err := ragService.RetrieveDocuments(query)
-                if err != nil {
-                        // 继续处理，但没有上下文
-                }
-                
-                // 获取仓库类型和名称
-                repoType := "GitHub"
-                if strings.Contains(request.RepoURL, "gitlab.com") {
-                        repoType = "GitLab"
-                }
-                
-                parts := strings.Split(request.RepoURL, "/")
-                repoName := parts[len(parts)-1]
-                if strings.HasSuffix(repoName, ".git") {
-                        repoName = repoName[:len(repoName)-4]
-                }
-                
-                // 构建系统提示
-                systemPrompt := fmt.Sprintf(`<role>
-你是一位专家代码分析师，正在检查 %s 仓库: %s (%s)。
-你提供有关代码仓库的直接、简洁和准确的信息。
-你绝不以 markdown 标题或代码围栏开始响应。
-</role>
+	var req models.ChatCompletionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的请求: %v", err)})
+		return
+	}
 
-</example_of_what_not_to_do>
+	// 获取当前活动的 RAG 提供者
+	provider, err := s.manager.GetActiveProvider()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取 RAG 提供者失败: %v", err)})
+		return
+	}
 
-- 在回答中使用适当的 markdown 格式，包括标题、列表和代码块
-- 对于代码分析，使用清晰的章节组织你的回答
-- 逐步思考并逻辑地构建你的回答
-- 从最相关的信息开始，直接解答用户的查询
-- 在讨论代码时要精确和技术性
-</guidelines>
-- 直接回答用户的问题，不要使用任何前言或填充短语
-- 不要以"好的，这是一个分析"或"以下是解释"等前言开始
-- 不要以 markdown 标题（如"## 分析..."）或任何文件路径引用开始
-- 不要以 ```markdown 代码围栏开始
-- 不要以 ``` 结束响应
-不要重复或确认问题
-直接开始回答问题
-```markdown ## 分析 `adalflow/adalflow/datasets/gsm8k.py`
-此文件包含...
-<style>
-- 使用简洁、直接的语言
-- 优先考虑准确性而非冗长
-- 显示代码时，在相关时包括行号和文件路径
-- 使用 markdown 格式提高可读性
-</style>`, repoType, request.RepoURL, repoName)
-                
-                // 构建提示
-                prompt := systemPrompt + "\n\n"
-                
-                // 添加对话历史
-                conversationHistory := ragService.Memory.GetFormattedHistory()
-                if conversationHistory != "" {
-                        prompt += "<conversation_history>\n" + conversationHistory + "</conversation_history>\n\n"
-                }
-                
-                // 添加文件内容（如果有）
-                if fileContent != "" {
-                        prompt += fmt.Sprintf("<currentFileContent path=\"%s\">\n%s\n</currentFileContent>\n\n", 
-                                request.FilePath, fileContent)
-                }
-                
-                // 添加上下文（如果有）
-                contextText := ""
-                if len(contextDocs) > 0 {
-                        for _, doc := range contextDocs {
-                                contextText += doc.Text + "\n\n"
-                        }
-                        prompt += "<context>\n" + contextText + "</context>\n\n"
-                } else {
-                        prompt += "<note>没有检索增强回答。</note>\n\n"
-                }
-                
-                // 添加查询
-                prompt += "<query>\n" + query + "</query>\n\nAssistant: "
-                
-                // 生成响应并流式传输
-                response, err := ragService.GenerateStreamingResponse(prompt)
-                if err != nil {
-                        // 尝试简化的提示
-                        simplifiedPrompt := systemPrompt + "\n\n"
-                        if conversationHistory != "" {
-                                simplifiedPrompt += "<conversation_history>\n" + conversationHistory + "</conversation_history>\n\n"
-                        }
-                        if fileContent != "" {
-                                simplifiedPrompt += fmt.Sprintf("<currentFileContent path=\"%s\">\n%s\n</currentFileContent>\n\n", 
-                                        request.FilePath, fileContent)
-                        }
-                        simplifiedPrompt += "<note>由于输入大小限制，没有检索增强回答。</note>\n\n"
-                        simplifiedPrompt += "<query>\n" + query + "</query>\n\nAssistant: "
-                        
-                        response, err = ragService.GenerateStreamingResponse(simplifiedPrompt)
-                        if err != nil {
-                                c.SSEvent("", "抱歉，我无法处理您的请求。请尝试较短的查询或将其分成较小的部分。")
-                                return
-                        }
-                }
-                
-                // 将响应流式传输到客户端
-                for chunk := range response {
-                        select {
-                        case <-clientGone:
-                                return
-                        default:
-                                c.SSEvent("", chunk)
-                                c.Writer.Flush()
-                        }
-                }
-        }()
-        
-        // 等待客户端断开连接
-        <-clientGone
+	// 选择访问令牌 (GitHub 或 GitLab)
+	accessToken := req.GitHubToken
+	if accessToken == "" {
+		accessToken = req.GitLabToken
+	}
+
+	// 准备仓库
+	if req.RepoURL != "" {
+		if err := provider.PrepareRetriever(req.RepoURL, accessToken); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("准备仓库失败: %v", err)})
+			return
+		}
+	}
+
+	// 获取最后一条用户消息
+	var userPrompt string
+	if len(req.Messages) > 0 {
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role == "user" {
+			userPrompt = lastMsg.Content
+		}
+	}
+
+	if userPrompt == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未找到用户消息"})
+		return
+	}
+
+	// 设置内容类型为SSE
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	// 创建一个SSE流
+	clientGone := c.Stream(func(w io.Writer) bool {
+		// 获取AI回复
+		responseCh, err := provider.GenerateStreamingResponse(userPrompt)
+		if err != nil {
+			c.SSEvent("error", gin.H{"error": fmt.Sprintf("生成失败: %v", err)})
+			return false
+		}
+
+		// 流式传输响应
+		for chunk := range responseCh {
+			c.SSEvent("message", chunk)
+		}
+
+		// 发送完成事件
+		c.SSEvent("done", nil)
+		return false
+	})
+
+	if !clientGone {
+		// 客户端断开连接
+		c.AbortWithStatus(http.StatusOK)
+	}
 }
 
-// 处理 wiki 导出
+// handleGenerateWiki 处理Wiki生成请求
+func (s *Server) handleGenerateWiki(c *gin.Context) {
+	var req struct {
+		RepoURL     string `json:"repo_url"`
+		GitHubToken string `json:"github_token,omitempty"`
+		GitLabToken string `json:"gitlab_token,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的请求: %v", err)})
+		return
+	}
+
+	// 获取当前活动的 RAG 提供者
+	provider, err := s.manager.GetActiveProvider()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取 RAG 提供者失败: %v", err)})
+		return
+	}
+
+	// 选择访问令牌
+	accessToken := req.GitHubToken
+	if accessToken == "" {
+		accessToken = req.GitLabToken
+	}
+
+	// 初始化库管理器
+	repoManager := data.NewRepositoryManager(s.config)
+
+	// 克隆仓库
+	repoPath, err := repoManager.CloneRepository(req.RepoURL, accessToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("克隆仓库失败: %v", err)})
+		return
+	}
+
+	// 分析仓库结构
+	analysis, err := repoManager.AnalyzeRepository(repoPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("分析仓库失败: %v", err)})
+		return
+	}
+
+	// 准备RAG检索器
+	if err := provider.PrepareRetriever(repoPath, accessToken); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("准备检索器失败: %v", err)})
+		return
+	}
+
+	// 生成Wiki页面
+	pages, err := s.generateWikiPages(analysis, req.RepoURL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("生成Wiki失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"pages": pages,
+	})
+}
+
+// handleExportWiki 处理Wiki导出请求
 func (s *Server) handleExportWiki(c *gin.Context) {
-        var request models.WikiExportRequest
-        
-        if err := c.ShouldBindJSON(&request); err != nil {
-                c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效请求: %v", err)})
-                return
-        }
-        
-        // 提取仓库名称和时间戳用于文件名
-        repoParts := strings.Split(strings.TrimRight(request.RepoURL, "/"), "/")
-        repoName := repoParts[len(repoParts)-1]
-        timestamp := time.Now().Format("20060102_150405")
-        
-        var content string
-        var filename string
-        var contentType string
-        
-        if request.Format == "markdown" {
-                // 生成 Markdown 内容
-                content = generateMarkdownExport(request.RepoURL, request.Pages)
-                filename = fmt.Sprintf("%s_wiki_%s.md", repoName, timestamp)
-                contentType = "text/markdown"
-        } else {
-                // 生成 JSON 内容
-                content = generateJSONExport(request.RepoURL, request.Pages)
-                filename = fmt.Sprintf("%s_wiki_%s.json", repoName, timestamp)
-                contentType = "application/json"
-        }
-        
-        // 设置文件下载的头部
-        c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
-        c.Data(http.StatusOK, contentType, []byte(content))
+	var req models.WikiExportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的请求: %v", err)})
+		return
+	}
+
+	if len(req.Pages) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未提供页面内容"})
+		return
+	}
+
+	// 根据不同格式导出
+	var content string
+	var contentType string
+	var filename string
+
+	repoName := getRepoNameFromURL(req.RepoURL)
+
+	switch strings.ToLower(req.Format) {
+	case "markdown", "md":
+		content = exportToMarkdown(req.Pages)
+		contentType = "text/markdown"
+		filename = fmt.Sprintf("%s-wiki.md", repoName)
+	case "json":
+		jsonData, err := json.MarshalIndent(req.Pages, "", "  ")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("序列化JSON失败: %v", err)})
+			return
+		}
+		content = string(jsonData)
+		contentType = "application/json"
+		filename = fmt.Sprintf("%s-wiki.json", repoName)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的导出格式"})
+		return
+	}
+
+	// 设置响应头
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
+	c.Data(http.StatusOK, contentType, []byte(content))
 }
 
-// 生成 Markdown 导出
-func generateMarkdownExport(repoURL string, pages []models.WikiPage) string {
-        // 开始添加元数据
-        markdown := fmt.Sprintf("# Wiki Documentation for %s\n\n", repoURL)
-        markdown += fmt.Sprintf("Generated on: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
-        
-        // 添加目录
-        markdown += "## Table of Contents\n\n"
-        for _, page := range pages {
-                markdown += fmt.Sprintf("- [%s](#%s)\n", page.Title, page.ID)
-        }
-        markdown += "\n"
-        
-        // 添加每个页面
-        for _, page := range pages {
-                markdown += fmt.Sprintf("<a id='%s'></a>\n\n", page.ID)
-                markdown += fmt.Sprintf("## %s\n\n", page.Title)
-                
-                // 添加相关文件
-                if len(page.FilePaths) > 0 {
-                        markdown += "### Related Files\n\n"
-                        for _, filePath := range page.FilePaths {
-                                markdown += fmt.Sprintf("- `%s`\n", filePath)
-                        }
-                        markdown += "\n"
-                }
-                
-                // 添加相关页面
-                if len(page.RelatedPages) > 0 {
-                        markdown += "### Related Pages\n\n"
-                        relatedTitles := []string{}
-                        for _, relatedID := range page.RelatedPages {
-                                // 查找相关页面的标题
-                                for _, p := range pages {
-                                        if p.ID == relatedID {
-                                                relatedTitles = append(relatedTitles, fmt.Sprintf("[%s](#%s)", p.Title, p.ID))
-                                                break
-                                        }
-                                }
-                        }
-                        
-                        if len(relatedTitles) > 0 {
-                                markdown += "Related topics: " + strings.Join(relatedTitles, ", ") + "\n\n"
-                        }
-                }
-                
-                // 添加页面内容
-                markdown += fmt.Sprintf("%s\n\n", page.Content)
-                markdown += "---\n\n"
-        }
-        
-        return markdown
+// handleAnalyzeRepo 处理仓库分析请求
+func (s *Server) handleAnalyzeRepo(c *gin.Context) {
+	var req struct {
+		RepoURL     string `json:"repo_url"`
+		GitHubToken string `json:"github_token,omitempty"`
+		GitLabToken string `json:"gitlab_token,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的请求: %v", err)})
+		return
+	}
+
+	// 选择访问令牌
+	accessToken := req.GitHubToken
+	if accessToken == "" {
+		accessToken = req.GitLabToken
+	}
+
+	// 初始化库管理器
+	repoManager := data.NewRepositoryManager(s.config)
+
+	// 克隆仓库
+	repoPath, err := repoManager.CloneRepository(req.RepoURL, accessToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("克隆仓库失败: %v", err)})
+		return
+	}
+
+	// 分析仓库结构
+	analysis, err := repoManager.AnalyzeRepository(repoPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("分析仓库失败: %v", err)})
+		return
+	}
+
+	// 生成结构图
+	diagram, err := generateRepoStructureDiagram(analysis)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("生成结构图失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"analysis": gin.H{
+			"repo":    analysis,
+			"diagram": diagram,
+		},
+	})
 }
 
-// 生成 JSON 导出
-func generateJSONExport(repoURL string, pages []models.WikiPage) string {
-        // 使用标准库的 JSON 编码
-        type ExportData struct {
-                Metadata struct {
-                        Repository  string    `json:"repository"`
-                        GeneratedAt time.Time `json:"generated_at"`
-                        PageCount   int       `json:"page_count"`
-                } `json:"metadata"`
-                Pages []models.WikiPage `json:"pages"`
-        }
-        
-        data := ExportData{
-                Pages: pages,
-        }
-        data.Metadata.Repository = repoURL
-        data.Metadata.GeneratedAt = time.Now()
-        data.Metadata.PageCount = len(pages)
-        
-        jsonData, err := json.MarshalIndent(data, "", "  ")
-        if err != nil {
-                return fmt.Sprintf("Error generating JSON: %v", err)
-        }
-        
-        return string(jsonData)
+// 辅助函数
+
+// generateWikiPages 生成Wiki页面
+func (s *Server) generateWikiPages(analysis map[string]interface{}, repoURL string) ([]models.WikiPage, error) {
+	// 获取当前活动的 RAG 提供者
+	provider, err := s.manager.GetActiveProvider()
+	if err != nil {
+		return nil, fmt.Errorf("获取 RAG 提供者失败: %v", err)
+	}
+
+	// 创建页面集合
+	var pages []models.WikiPage
+
+	// 创建概述页面
+	overviewPage, err := s.generateOverviewPage(analysis, repoURL, provider)
+	if err != nil {
+		return nil, err
+	}
+	pages = append(pages, overviewPage)
+
+	// 创建架构页面
+	architecturePage, err := s.generateArchitecturePage(analysis, repoURL, provider)
+	if err != nil {
+		return nil, err
+	}
+	pages = append(pages, architecturePage)
+
+	// 为每个主要目录创建模块页面
+	for dirName, dirContent := range analysis {
+		if content, ok := dirContent.(map[string]interface{}); ok {
+			if isNonEssentialDir(dirName) {
+				continue
+			}
+
+			modulePage, err := s.generateModulePage(dirName, content, repoURL, provider)
+			if err != nil {
+				continue // 跳过出错的模块
+			}
+			pages = append(pages, modulePage)
+		}
+	}
+
+	return pages, nil
+}
+
+// generateOverviewPage 生成项目概述页面
+func (s *Server) generateOverviewPage(analysis map[string]interface{}, repoURL string, provider rag.RAGProvider) (models.WikiPage, error) {
+	// 准备查询获取项目概述
+	query := fmt.Sprintf("生成以下代码仓库的概述: %s\n\n请包括以下内容:\n- 项目名称和简短描述\n- 主要功能\n- 技术栈概览\n- 开发者指南", repoURL)
+
+	// 检索相关文档
+	docs, err := provider.RetrieveDocuments(query)
+	if err != nil {
+		return models.WikiPage{}, err
+	}
+
+	// 构建上下文
+	var context string
+	for _, doc := range docs {
+		context += doc.Text + "\n\n"
+	}
+
+	// 生成概述内容
+	prompt := fmt.Sprintf("基于以下代码库的信息，生成一个项目概述页面：\n\n%s\n\n请使用Markdown格式，包括以下部分：\n1. 项目简介\n2. 主要功能\n3. 技术栈\n4. 入门指南", context)
+
+	responseCh, err := provider.GenerateStreamingResponse(prompt)
+	if err != nil {
+		return models.WikiPage{}, err
+	}
+
+	// 收集响应
+	var content strings.Builder
+	for chunk := range responseCh {
+		content.WriteString(chunk)
+	}
+
+	// 获取仓库名称
+	repoName := getRepoNameFromURL(repoURL)
+
+	// 创建页面
+	return models.WikiPage{
+		ID:           "overview",
+		Title:        fmt.Sprintf("%s - 项目概述", repoName),
+		Content:      content.String(),
+		FilePaths:    []string{"README.md", "CONTRIBUTING.md", "docs/"},
+		Importance:   "high",
+		RelatedPages: []string{},
+	}, nil
+}
+
+// generateArchitecturePage 生成架构页面
+func (s *Server) generateArchitecturePage(analysis map[string]interface{}, repoURL string, provider rag.RAGProvider) (models.WikiPage, error) {
+	// 生成结构图
+	diagram, err := generateRepoStructureDiagram(analysis)
+	if err != nil {
+		return models.WikiPage{}, err
+	}
+
+	query := "描述此代码库的整体架构、主要组件和它们之间的关系"
+
+	// 检索相关文档
+	docs, err := provider.RetrieveDocuments(query)
+	if err != nil {
+		return models.WikiPage{}, err
+	}
+
+	// 构建上下文
+	var context string
+	for _, doc := range docs {
+		context += doc.Text + "\n\n"
+	}
+
+	// 生成架构内容
+	prompt := fmt.Sprintf("基于以下代码信息，生成一个架构文档：\n\n%s\n\n请使用Markdown格式，解释主要组件及其交互方式。以下是项目结构图，请在解释中引用它：\n\n```mermaid\n%s\n```", context, diagram)
+
+	responseCh, err := provider.GenerateStreamingResponse(prompt)
+	if err != nil {
+		return models.WikiPage{}, err
+	}
+
+	// 收集响应
+	var content strings.Builder
+	for chunk := range responseCh {
+		content.WriteString(chunk)
+	}
+
+	// 获取仓库名称
+	repoName := getRepoNameFromURL(repoURL)
+
+	// 创建页面
+	return models.WikiPage{
+		ID:           "architecture",
+		Title:        fmt.Sprintf("%s - 系统架构", repoName),
+		Content:      content.String(),
+		FilePaths:    []string{},
+		Importance:   "high",
+		RelatedPages: []string{"overview"},
+	}, nil
+}
+
+// generateModulePage 生成模块页面
+func (s *Server) generateModulePage(moduleName string, moduleContent interface{}, repoURL string, provider rag.RAGProvider) (models.WikiPage, error) {
+	// 准备查询
+	query := fmt.Sprintf("描述%s目录中的代码功能和主要组件", moduleName)
+
+	// 检索相关文档
+	docs, err := provider.RetrieveDocuments(query)
+	if err != nil {
+		return models.WikiPage{}, err
+	}
+
+	// 构建上下文
+	var context string
+	for _, doc := range docs {
+		context += doc.Text + "\n\n"
+	}
+
+	// 生成模块内容
+	prompt := fmt.Sprintf("请基于以下代码信息，详细描述'%s'模块的功能、组件和用法：\n\n%s\n\n请使用Markdown格式，包括：\n1. 模块概述\n2. 主要组件和类\n3. 关键功能\n4. 与其他模块的交互\n5. 示例用法（如果适用）", moduleName, context)
+
+	responseCh, err := provider.GenerateStreamingResponse(prompt)
+	if err != nil {
+		return models.WikiPage{}, err
+	}
+
+	// 收集响应
+	var content strings.Builder
+	for chunk := range responseCh {
+		content.WriteString(chunk)
+	}
+
+	// 创建页面
+	return models.WikiPage{
+		ID:           fmt.Sprintf("module-%s", strings.ToLower(moduleName)),
+		Title:        fmt.Sprintf("%s 模块", moduleName),
+		Content:      content.String(),
+		FilePaths:    []string{moduleName + "/"},
+		Importance:   "medium",
+		RelatedPages: []string{"architecture", "overview"},
+	}, nil
+}
+
+// 生成仓库结构图
+func generateRepoStructureDiagram(analysis map[string]interface{}) (string, error) {
+	if structure, ok := analysis["structure"].(map[string]interface{}); ok {
+		// 创建Mermaid图表
+		var diagram strings.Builder
+		diagram.WriteString("graph TD\n")
+		diagram.WriteString("    Root[项目根目录] --> ")
+
+		// 添加顶级目录
+		var dirs []string
+		for dir := range structure {
+			if !strings.HasPrefix(dir, ".") && !isNonEssentialDir(dir) {
+				dirs = append(dirs, dir)
+			}
+		}
+
+		// 按字母顺序排序目录
+		sort.Strings(dirs)
+
+		// 添加目录节点
+		for i, dir := range dirs {
+			dirID := fmt.Sprintf("Dir%d", i)
+			diagram.WriteString(fmt.Sprintf("%s[%s]\n", dirID, dir))
+
+			// 递归添加目录结构
+			if dirContent, ok := structure[dir].(map[string]interface{}); ok {
+				addDirStructure(&diagram, dirID, dirContent, 0)
+			}
+
+			// 如果不是最后一个目录，添加Root到下一个目录的连接
+			if i < len(dirs)-1 {
+				diagram.WriteString("    Root --> ")
+			}
+		}
+
+		// 添加样式
+		diagram.WriteString("\n    classDef root fill:#f9f,stroke:#333,stroke-width:2px;\n")
+		diagram.WriteString("    classDef dir fill:#bbf,stroke:#33c,stroke-width:1px;\n")
+		diagram.WriteString("    classDef file fill:#bfb,stroke:#3c3,stroke-width:1px;\n")
+		diagram.WriteString("    class Root root;\n")
+
+		// 为所有目录添加dir类
+		for i := range dirs {
+			diagram.WriteString(fmt.Sprintf("    class Dir%d dir;\n", i))
+		}
+
+		return diagram.String(), nil
+	}
+
+	return "", fmt.Errorf("无法获取仓库结构信息")
+}
+
+// 递归添加目录结构到图表
+func addDirStructure(diagram *strings.Builder, parentID string, content map[string]interface{}, depth int) {
+	if depth > 2 { // 限制深度
+		return
+	}
+
+	// 排序目录和文件
+	var items []string
+	for name := range content {
+		items = append(items, name)
+	}
+	sort.Strings(items)
+
+	// 最多显示5个子项
+	maxItems := 5
+	if len(items) > maxItems {
+		items = items[:maxItems]
+	}
+
+	for i, name := range items {
+		itemID := fmt.Sprintf("%s_%d", parentID, i)
+
+		// 检查是子目录还是文件
+		if subDir, ok := content[name].(map[string]interface{}); ok {
+			// 这是一个目录
+			diagram.WriteString(fmt.Sprintf("    %s --> %s[%s/]\n", parentID, itemID, name))
+			diagram.WriteString(fmt.Sprintf("    class %s dir;\n", itemID))
+
+			// 递归处理子目录
+			addDirStructure(diagram, itemID, subDir, depth+1)
+		} else {
+			// 这是一个文件
+			diagram.WriteString(fmt.Sprintf("    %s --> %s[%s]\n", parentID, itemID, name))
+			diagram.WriteString(fmt.Sprintf("    class %s file;\n", itemID))
+		}
+	}
+
+	// 如果有更多项，添加省略号
+	if len(content) > maxItems {
+		moreID := fmt.Sprintf("%s_more", parentID)
+		diagram.WriteString(fmt.Sprintf("    %s --> %s[...更多项]\n", parentID, moreID))
+	}
+}
+
+// 辅助函数
+
+// getRepoNameFromURL 从URL中提取仓库名称
+func getRepoNameFromURL(url string) string {
+	// 移除协议前缀
+	url = strings.TrimPrefix(url, "https://")
+	url = strings.TrimPrefix(url, "http://")
+
+	// 移除.git后缀
+	url = strings.TrimSuffix(url, ".git")
+
+	// 分割路径部分
+	parts := strings.Split(url, "/")
+	if len(parts) > 1 {
+		return parts[len(parts)-1]
+	}
+
+	return "wiki"
+}
+
+// exportToMarkdown 将Wiki页面导出为Markdown
+func exportToMarkdown(pages []models.WikiPage) string {
+	var result strings.Builder
+
+	// 添加标题
+	result.WriteString("# DeepWiki 导出\n\n")
+	result.WriteString("## 目录\n\n")
+
+	// 生成目录
+	for _, page := range pages {
+		result.WriteString(fmt.Sprintf("- [%s](#%s)\n", page.Title, strings.ToLower(strings.ReplaceAll(page.ID, " ", "-"))))
+	}
+
+	result.WriteString("\n---\n\n")
+
+	// 添加每个页面的内容
+	for _, page := range pages {
+		result.WriteString(fmt.Sprintf("## %s\n\n", page.Title))
+		result.WriteString(page.Content)
+		result.WriteString("\n\n---\n\n")
+	}
+
+	// 添加页脚
+	result.WriteString("*由 DeepWiki-Go 生成*\n")
+
+	return result.String()
+}
+
+// isNonEssentialDir 检查是否为非关键目录
+func isNonEssentialDir(dirName string) bool {
+	nonEssentialDirs := map[string]bool{
+		"node_modules": true,
+		"vendor":       true,
+		"dist":         true,
+		"build":        true,
+		"target":       true,
+		"bin":          true,
+		"obj":          true,
+	}
+
+	return nonEssentialDirs[dirName]
+}
+
+// min 返回两个整数中较小的一个
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

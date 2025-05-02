@@ -6,6 +6,8 @@ import "os"
 type Config struct {
         GoogleAPIKey string
         OpenAIAPIKey string
+        ProjectID    string // Google Cloud 项目 ID
+        Location     string // Google Cloud 区域
         Port         string
         
         // 文本分割器配置
@@ -32,6 +34,8 @@ func NewConfig() *Config {
         cfg := &Config{
                 GoogleAPIKey: os.Getenv("GOOGLE_API_KEY"),
                 OpenAIAPIKey: os.Getenv("OPENAI_API_KEY"),
+                ProjectID:    os.Getenv("GOOGLE_CLOUD_PROJECT"),
+                Location:     os.Getenv("GOOGLE_CLOUD_LOCATION"),
                 Port:         os.Getenv("PORT"),
         }
         
