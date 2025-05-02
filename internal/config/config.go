@@ -32,6 +32,11 @@ type DBConfig struct {
 	Type             string `yaml:"type"`
 	Path             string `yaml:"path,omitempty"` // Used for file-based DBs like JSON, SQLite
 	ConnectionString string `yaml:"connection_string,omitempty"` // Used for server-based DBs like Postgres
+	
+	// Milvus specific settings
+	MilvusAddress      string `yaml:"milvus_address,omitempty"` // Milvus server address, default: localhost:19530
+	MilvusCollection   string `yaml:"milvus_collection,omitempty"` // Milvus collection name, default: deepwiki_documents
+	EmbeddingDimension int    `yaml:"embedding_dimension,omitempty"` // Dimension of embedding vectors, default: 768
 }
 
 // LoggingConfig holds logging configuration

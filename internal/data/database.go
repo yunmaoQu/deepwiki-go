@@ -16,29 +16,51 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/deepwiki-go/internal/config"
 	"github.com/deepwiki-go/internal/models"
 	"github.com/deepwiki-go/pkg/utils"
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 )
 
+// Default values for Milvus configuration
 const (
-	collectionName     = "deepwiki_documents"
-	embeddingDimension = 768               // Example dimension, replace with your model's dimension
-	milvusAddress      = "localhost:19530" // Default Milvus address
+	defaultCollectionName     = "deepwiki_documents"
+	defaultEmbeddingDimension = 768
+	defaultMilvusAddress      = "localhost:19530"
 )
 
 // DatabaseManager 管理文档数据库
 type DatabaseManager struct {
-	milvusClient  client.Client
-	repoURLOrPath string
-	repoPaths     map[string]string
-	mu            sync.RWMutex // To protect access to internal state if needed
-	initialized   bool
+	milvusClient       client.Client
+	repoURLOrPath      string
+	repoPaths          map[string]string
+	mu                 sync.RWMutex // To protect access to internal state if needed
+	initialized        bool
+	
+	// Configuration values
+	collectionName     string
+	embeddingDimension int
+	milvusAddress      string
 }
 
 // NewDatabaseManager 创建一个新的数据库管理器
-func NewDatabaseManager() (*DatabaseManager, error) {
+func NewDatabaseManager(cfg *config.Config) (*DatabaseManager, error) {
+	// Use configuration values or defaults
+	milvusAddress := defaultMilvusAddress
+	if cfg != nil && cfg.DB.MilvusAddress != "" {
+		milvusAddress = cfg.DB.MilvusAddress
+	}
+
+	collectionName := defaultCollectionName
+	if cfg != nil && cfg.DB.MilvusCollection != "" {
+		collectionName = cfg.DB.MilvusCollection
+	}
+
+	embeddingDimension := defaultEmbeddingDimension
+	if cfg != nil && cfg.DB.EmbeddingDimension > 0 {
+		embeddingDimension = cfg.DB.EmbeddingDimension
+	}
 
 	log.Printf("Connecting to Milvus at %s", milvusAddress)
 	milvusClient, err := client.NewClient(context.Background(), client.Config{
@@ -49,8 +71,11 @@ func NewDatabaseManager() (*DatabaseManager, error) {
 	}
 
 	dm := &DatabaseManager{
-		milvusClient: milvusClient,
-		repoPaths:    make(map[string]string),
+		milvusClient:       milvusClient,
+		repoPaths:          make(map[string]string),
+		collectionName:     collectionName,
+		embeddingDimension: embeddingDimension,
+		milvusAddress:      milvusAddress,
 	}
 
 	err = dm.ensureCollectionExists()
@@ -74,16 +99,16 @@ func (dm *DatabaseManager) ensureCollectionExists() error {
 	}
 
 	ctx := context.Background()
-	has, err := dm.milvusClient.HasCollection(ctx, collectionName)
+	has, err := dm.milvusClient.HasCollection(ctx, dm.collectionName)
 	if err != nil {
 		return fmt.Errorf("failed to check if collection exists: %w", err)
 	}
 
 	if !has {
-		log.Printf("Collection '%s' does not exist. Creating...", collectionName)
+		log.Printf("Collection '%s' does not exist. Creating...", dm.collectionName)
 		// Define schema
 		schema := &entity.Schema{
-			CollectionName: collectionName,
+			CollectionName: dm.collectionName,
 			Description:    "DeepWiki document collection",
 			AutoID:         false,
 			Fields: []*entity.Field{
@@ -101,7 +126,7 @@ func (dm *DatabaseManager) ensureCollectionExists() error {
 					Name:     "embedding",
 					DataType: entity.FieldTypeFloatVector,
 					TypeParams: map[string]string{
-						"dim": fmt.Sprintf("%d", embeddingDimension),
+						"dim": fmt.Sprintf("%d", dm.embeddingDimension),
 					},
 				},
 				{
@@ -117,9 +142,9 @@ func (dm *DatabaseManager) ensureCollectionExists() error {
 
 		err = dm.milvusClient.CreateCollection(ctx, schema, entity.DefaultShardNumber)
 		if err != nil {
-			return fmt.Errorf("failed to create collection '%s': %w", collectionName, err)
+			return fmt.Errorf("failed to create collection '%s': %w", dm.collectionName, err)
 		}
-		log.Printf("Collection '%s' created successfully.", collectionName)
+		log.Printf("Collection '%s' created successfully.", dm.collectionName)
 
 		// Create index for the embedding field after creating the collection
 		log.Printf("Creating index for embedding field...")
@@ -127,22 +152,22 @@ func (dm *DatabaseManager) ensureCollectionExists() error {
 		if err != nil {
 			return fmt.Errorf("failed to create HNSW index parameters: %w", err)
 		}
-		err = dm.milvusClient.CreateIndex(ctx, collectionName, "embedding", index, false)
+		err = dm.milvusClient.CreateIndex(ctx, dm.collectionName, "embedding", index, false)
 		if err != nil {
 			return fmt.Errorf("failed to create index on 'embedding': %w", err)
 		}
 		log.Printf("Index created successfully for embedding field.")
 	} else {
-		log.Printf("Collection '%s' already exists.", collectionName)
+		log.Printf("Collection '%s' already exists.", dm.collectionName)
 	}
 
 	// Load collection into memory for searching
-	log.Printf("Loading collection '%s' into memory...", collectionName)
-	err = dm.milvusClient.LoadCollection(ctx, collectionName, false)
+	log.Printf("Loading collection '%s' into memory...", dm.collectionName)
+	err = dm.milvusClient.LoadCollection(ctx, dm.collectionName, false)
 	if err != nil {
-		return fmt.Errorf("failed to load collection '%s': %w", collectionName, err)
+		return fmt.Errorf("failed to load collection '%s': %w", dm.collectionName, err)
 	}
-	log.Printf("Collection '%s' loaded successfully.", collectionName)
+	log.Printf("Collection '%s' loaded successfully.", dm.collectionName)
 
 	dm.initialized = true
 	return nil
@@ -201,9 +226,9 @@ func (dm *DatabaseManager) PrepareDatabase(repoURLOrPath string, accessToken str
 	}
 
 	// Ensure data is flushed
-	err = dm.milvusClient.Flush(context.Background(), collectionName, false)
+	err = dm.milvusClient.Flush(context.Background(), dm.collectionName, false)
 	if err != nil {
-		log.Printf("Warning: failed to flush collection '%s': %v", collectionName, err)
+		log.Printf("Warning: failed to flush collection '%s': %v", dm.collectionName, err)
 		// Not returning error here, as inserts might still succeed later
 	}
 
@@ -233,7 +258,7 @@ func (dm *DatabaseManager) addDocumentInternal(doc *models.Document) error {
 	// Prepare data for Milvus
 	idCol := entity.NewColumnInt64("doc_id", []int64{docID})
 	pathCol := entity.NewColumnVarChar("file_path", []string{filePath})
-	embeddingCol := entity.NewColumnFloatVector("embedding", embeddingDimension, [][]float32{embedding})
+	embeddingCol := entity.NewColumnFloatVector("embedding", dm.embeddingDimension, [][]float32{embedding})
 	textCol := entity.NewColumnVarChar("raw_text", []string{doc.Text})
 
 	metadataBytes, err := json.Marshal(doc.MetaData)
@@ -242,7 +267,7 @@ func (dm *DatabaseManager) addDocumentInternal(doc *models.Document) error {
 	}
 	metadataCol := entity.NewColumnVarChar("metadata_json", []string{string(metadataBytes)})
 
-	_, err = dm.milvusClient.Insert(ctx, collectionName, "", idCol, pathCol, embeddingCol, textCol, metadataCol)
+	_, err = dm.milvusClient.Insert(ctx, dm.collectionName, "", idCol, pathCol, embeddingCol, textCol, metadataCol)
 	if err != nil {
 		return fmt.Errorf("failed to insert document '%s' (ID: %d) into Milvus: %w", filePath, docID, err)
 	}
@@ -435,16 +460,16 @@ func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Doc
 	// 3. Perform search
 	log.Printf("Searching Milvus (topK=%d)...", topK)
 	searchResult, err := dm.milvusClient.Search(
-		ctx,                                                // context
-		collectionName,                                     // Collection name
-		[]string{},                                         // Partition names (empty for all)
-		"",                                                 // Filter expression (empty for none)
+		ctx,            // context
+		dm.collectionName, // Collection name
+		[]string{},     // Partition names (empty for all)
+		"",             // Filter expression (empty for none)
 		[]string{"file_path", "raw_text", "metadata_json"}, // Output fields
-		vector,                                             // Query vectors
-		"embedding",                                        // Vector field name
-		entity.L2,                                          // Metric type
-		topK,                                               // Top K results
-		searchParam,                                        // Search parameters
+		vector,      // Query vectors
+		"embedding", // Vector field name
+		entity.L2,   // Metric type
+		topK,        // Top K results
+		searchParam, // Search parameters
 	)
 	if err != nil {
 		return nil, fmt.Errorf("Milvus search failed: %w", err)
@@ -525,15 +550,20 @@ func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Doc
 	return documents, nil
 }
 
-// getEmbedding generates a placeholder embedding for text.
-// Replace this with your actual embedding model call.
+// getEmbedding 获取文本的嵌入向量（当前为随机生成的占位符）
 func (dm *DatabaseManager) getEmbedding(text string) ([]float32, error) {
 	// Placeholder: Generate a random vector
 	// In a real application, call your embedding model API (e.g., OpenAI, Sentence-Transformers)
-	vec := make([]float32, embeddingDimension)
+	// using the provided text parameter
+	
+	// For now, we're just generating a random vector and not using the text parameter
+	_ = text // Acknowledge the parameter to avoid unused parameter warning
+	
+	vec := make([]float32, dm.embeddingDimension)
 	for i := range vec {
 		vec[i] = rand.Float32()
 	}
+
 	// Normalize the vector (optional, but often recommended for cosine similarity)
 	var norm float32
 	for _, v := range vec {
@@ -545,6 +575,7 @@ func (dm *DatabaseManager) getEmbedding(text string) ([]float32, error) {
 			vec[i] /= norm
 		}
 	}
+
 	return vec, nil
 }
 
@@ -564,9 +595,9 @@ func (dm *DatabaseManager) AddDocument(doc *models.Document) error {
 	}
 
 	// Flush immediately after single add for consistency?
-	err = dm.milvusClient.Flush(context.Background(), collectionName, false)
+	err = dm.milvusClient.Flush(context.Background(), dm.collectionName, false)
 	if err != nil {
-		log.Printf("Warning: failed to flush collection '%s' after single add: %v", collectionName, err)
+		log.Printf("Warning: failed to flush collection '%s' after single add: %v", dm.collectionName, err)
 	}
 
 	log.Printf("Added single document '%s' to Milvus.", doc.MetaData["file_path"])
@@ -590,9 +621,9 @@ func (dm *DatabaseManager) GetDocument(filePath string) (*models.Document, error
 	log.Printf("Querying Milvus for doc_id: %d (path: %s)", docID, filePath)
 	results, err := dm.milvusClient.Query(
 		ctx,
-		collectionName,
-		[]string{},                                         // No partition names
-		fmt.Sprintf("doc_id == %d", docID),                 // Filter expression by primary key
+		dm.collectionName,
+		[]string{},                         // No partition names
+		fmt.Sprintf("doc_id == %d", docID), // Filter expression by primary key
 		[]string{"file_path", "raw_text", "metadata_json"}, // Output fields
 	)
 	if err != nil {
@@ -667,7 +698,7 @@ func (dm *DatabaseManager) DeleteDocument(filePath string) error {
 	log.Printf("Deleting document from Milvus with doc_id: %d (path: %s)", docID, filePath)
 	err := dm.milvusClient.Delete(
 		ctx,
-		collectionName,
+		dm.collectionName,
 		"",                                 // No partition names
 		fmt.Sprintf("doc_id == %d", docID), // Filter expression by primary key
 	)
@@ -678,9 +709,9 @@ func (dm *DatabaseManager) DeleteDocument(filePath string) error {
 	log.Printf("Successfully deleted document '%s' (ID: %d) from Milvus.", filePath, docID)
 
 	// Optionally flush immediately
-	err = dm.milvusClient.Flush(context.Background(), collectionName, false)
+	err = dm.milvusClient.Flush(context.Background(), dm.collectionName, false)
 	if err != nil {
-		log.Printf("Warning: failed to flush collection '%s' after delete: %v", collectionName, err)
+		log.Printf("Warning: failed to flush collection '%s' after delete: %v", dm.collectionName, err)
 	}
 
 	return nil

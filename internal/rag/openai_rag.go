@@ -28,7 +28,7 @@ type OpenAIRAG struct {
 
 // NewOpenAIRAG 创建一个新的 OpenAI RAG 实例
 func NewOpenAIRAG(cfg *config.Config) (*OpenAIRAG, error) {
-	dbManager, err := data.NewDatabaseManager()
+	dbManager, err := data.NewDatabaseManager(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create DatabaseManager: %w", err)
 	}

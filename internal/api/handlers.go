@@ -60,7 +60,7 @@ func NewServer(cfg *config.Config) *Server {
 	}
 
 	// 初始化数据库管理器
-	dbManager, err := data.NewDatabaseManager()
+	dbManager, err := data.NewDatabaseManager(cfg)
 	if err != nil {
 		log.Printf("初始化数据库管理器失败: %v\n", err)
 		// 继续运行，但某些功能可能不可用

@@ -28,7 +28,7 @@ type GoogleRAG struct {
 
 // NewGoogleRAG 创建一个新的 Google RAG 实例
 func NewGoogleRAG(cfg *config.Config) *GoogleRAG {
-	dbManager, err := data.NewDatabaseManager()
+	dbManager, err := data.NewDatabaseManager(cfg)
 	if err != nil {
 		panic(fmt.Sprintf("初始化DatabaseManager失败: %v", err))
 	}
