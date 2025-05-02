@@ -246,7 +246,7 @@ func (r *GoogleRAG) GenerateStreamingResponse(prompt string) (chan string, error
 		maxTokens := int32(2048)
 
 		// 创建生成请求
-		model := r.GoogleClient.GenerativeModel("gemini-1.0-pro")
+		model := r.GoogleClient.GenerativeModel("gemini-2.5-pro")
 		model.Temperature = &temperature
 		model.TopP = &topP
 		model.TopK = &topK
