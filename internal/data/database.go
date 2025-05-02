@@ -213,6 +213,10 @@ func (dm *DatabaseManager) PrepareDatabase(repoURLOrPath string, accessToken str
 	return nil
 }
 
+func (dm *DatabaseManager) createRepo(repoURLOrPath string, accessToken string) any {
+	panic("unimplemented")
+}
+
 // addDocumentInternal adds a single document to Milvus (used internally by PrepareDatabase)
 // Assumes lock is already held if called from PrepareDatabase
 func (dm *DatabaseManager) addDocumentInternal(doc *models.Document) error {
@@ -384,7 +388,7 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 			}
 
 			// Check token count
-			tokenCount := utils.CountTokens(string(content))
+			tokenCount := utils.CountTokens(string(content), "gpt-4o")
 			if tokenCount > 8192 { // Maximum embedding token limit
 				log.Printf("Skipping large file %s: Token count (%d) exceeds limit", relativePath, tokenCount)
 				continue
@@ -433,16 +437,16 @@ func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Doc
 	// 3. Perform search
 	log.Printf("Searching Milvus (topK=%d)...", topK)
 	searchResult, err := dm.milvusClient.Search(
-		ctx,            // context
-		collectionName, // Collection name
-		[]string{},     // Partition names (empty for all)
-		"",             // Filter expression (empty for none)
+		ctx,                                                // context
+		collectionName,                                     // Collection name
+		[]string{},                                         // Partition names (empty for all)
+		"",                                                 // Filter expression (empty for none)
 		[]string{"file_path", "raw_text", "metadata_json"}, // Output fields
-		vector,      // Query vectors
-		"embedding", // Vector field name
-		entity.L2,   // Metric type
-		topK,        // Top K results
-		searchParam, // Search parameters
+		vector,                                             // Query vectors
+		"embedding",                                        // Vector field name
+		entity.L2,                                          // Metric type
+		topK,                                               // Top K results
+		searchParam,                                        // Search parameters
 	)
 	if err != nil {
 		return nil, fmt.Errorf("Milvus search failed: %w", err)
@@ -551,8 +555,8 @@ func (dm *DatabaseManager) GetDocument(filePath string) (*models.Document, error
 	results, err := dm.milvusClient.Query(
 		ctx,
 		collectionName,
-		[]string{},                         // No partition names
-		fmt.Sprintf("doc_id == %d", docID), // Filter expression by primary key
+		[]string{},                                         // No partition names
+		fmt.Sprintf("doc_id == %d", docID),                 // Filter expression by primary key
 		[]string{"file_path", "raw_text", "metadata_json"}, // Output fields
 	)
 	if err != nil {
@@ -564,8 +568,8 @@ func (dm *DatabaseManager) GetDocument(filePath string) (*models.Document, error
 	}
 
 	// Should only be one result for a primary key query
-	rawTextField, _ := results.GetColumn("raw_text")
-	metadataJSONField, _ := results.GetColumn("metadata_json")
+	rawTextField := results.GetColumn("raw_text")
+	metadataJSONField := results.GetColumn("metadata_json")
 
 	rawTextData := rawTextField.(*entity.ColumnVarChar)
 	metadataJSONData := metadataJSONField.(*entity.ColumnVarChar)
@@ -603,7 +607,7 @@ func (dm *DatabaseManager) DeleteDocument(filePath string) error {
 
 	// Delete from Milvus by primary key (doc_id)
 	log.Printf("Deleting document from Milvus with doc_id: %d (path: %s)", docID, filePath)
-	_, err := dm.milvusClient.Delete(
+	err := dm.milvusClient.Delete(
 		ctx,
 		collectionName,
 		"",                                 // No partition names

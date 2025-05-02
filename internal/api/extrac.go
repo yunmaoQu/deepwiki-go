@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"io"
 
-	"github.com/ledongthuc/pdf"       // go get github.com/ledongthuc/pdf
-	"github.com/otiai10/gosseract/v2" // go get github.com/otiai10/gosseract/v2
+	"github.com/ledongthuc/pdf"       
+	"github.com/otiai10/gosseract/v2" 
 )
 
 // PDF
 func ExtractTextFromPDF(r io.Reader) (string, error) {
-	f, err := pdf.NewReader(r, int64(r.(io.Seeker).Seek(0, io.SeekEnd)))
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	bytesReader := bytes.NewReader(data)
+	f, err := pdf.NewReader(bytesReader, int64(len(data)))
 	if err != nil {
 		return "", err
 	}

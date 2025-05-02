@@ -1,9 +1,16 @@
 package rag
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+
+	"bufio"
+	"strings"
 
 	"github.com/deepwiki-go/internal/config"
 	"github.com/deepwiki-go/internal/data"
@@ -12,11 +19,11 @@ import (
 
 // OpenAIRAG 实现基于 OpenAI 的检索增强生成
 type OpenAIRAG struct {
-	Memory    *Memory
-	Config    *config.Config
-	DbManager *data.DatabaseManager
-	RepoURL   string
-	// TODO: 添加 OpenAI 客户端
+	Memory       *Memory
+	Config       *config.Config
+	DbManager    *data.DatabaseManager
+	RepoURL      string
+	OpenAIClient *http.Client 
 }
 
 // NewOpenAIRAG 创建一个新的 OpenAI RAG 实例
@@ -42,8 +49,8 @@ func (r *OpenAIRAG) Initialize() error {
 	if r.Config.OpenAIAPIKey == "" {
 		return fmt.Errorf("缺少必要的 OpenAI API Key")
 	}
-
-	// TODO: 初始化 OpenAI 客户端
+	// 初始化OpenAI客户端
+	r.OpenAIClient = &http.Client{}
 	return nil
 }
 
@@ -72,12 +79,80 @@ func (r *OpenAIRAG) RetrieveDocuments(query string) ([]models.Document, error) {
 
 // GenerateStreamingResponse 生成流式响应
 func (r *OpenAIRAG) GenerateStreamingResponse(prompt string) (chan string, error) {
-	// TODO: 实现 OpenAI 的流式响应生成
-	return nil, errors.New("OpenAI 流式响应生成尚未实现")
+	if r.OpenAIClient == nil {
+		return nil, errors.New("OpenAI 客户端未初始化")
+	}
+
+	responseCh := make(chan string)
+	go func() {
+		defer close(responseCh)
+
+		// 构造OpenAI Chat Completion流式请求
+		url := "https://api.openai.com/v1/chat/completions"
+		requestBody := map[string]interface{}{
+			"model": "gpt-o3", // 可根据需要切换模型
+			"messages": []map[string]string{{
+				"role":    "user",
+				"content": prompt,
+			}},
+			"stream": true,
+		}
+		jsonData, _ := json.Marshal(requestBody)
+
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+		if err != nil {
+			responseCh <- "请求构建失败"
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+r.Config.OpenAIAPIKey)
+
+		resp, err := r.OpenAIClient.Do(req)
+		if err != nil {
+			responseCh <- "请求发送失败: " + err.Error()
+			return
+		}
+		defer resp.Body.Close()
+
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				responseCh <- "读取响应失败: " + err.Error()
+				break
+			}
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			if line == "data: [DONE]" {
+				break
+			}
+			// 解析JSON块
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err == nil {
+				for _, choice := range chunk.Choices {
+					if choice.Delta.Content != "" {
+						responseCh <- choice.Delta.Content
+					}
+				}
+			}
+		}
+	}()
+	return responseCh, nil
 }
 
 // Close 清理资源
 func (r *OpenAIRAG) Close() error {
-	// TODO: 清理 OpenAI 客户端资源
+	r.OpenAIClient = nil
 	return nil
 }

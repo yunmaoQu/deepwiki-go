@@ -2,19 +2,23 @@
 package utils
 
 import (
-        "log"
-        "strings"
+	"log"
+
+	"github.com/pkoukk/tiktoken-go"
 )
 
 // 最大嵌入 token 限制
 const MaxEmbeddingTokens = 8192
 
-// CountTokens 计算文本字符串中的 token 数量
-func CountTokens(text string) int {
-        // 简单的近似值: 平均每个单词 1.3 个 token
-        // 在实际实现中，你应该使用专门的分词器
-        words := strings.Fields(text)
-        count := int(float64(len(words)) * 1.3)
-        log.Printf("Token count for text (length: %d words): %d\n", len(words), count)
-        return count
+// CountTokens 使用OpenAI tiktoken分词器精确计算token数
+func CountTokens(text string, model string) int {
+	enc, err := tiktoken.EncodingForModel(model)
+	if err != nil {
+		log.Printf("tiktoken: 模型不支持，使用cl100k_base: %v", err)
+		enc, _ = tiktoken.GetEncoding("cl100k_base")
+	}
+	tokens := enc.Encode(text, nil, nil)
+	count := len(tokens)
+	log.Printf("Token count for text (model: %s): %d", model, count)
+	return count
 }

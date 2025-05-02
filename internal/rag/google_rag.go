@@ -28,10 +28,14 @@ type GoogleRAG struct {
 
 // NewGoogleRAG 创建一个新的 Google RAG 实例
 func NewGoogleRAG(cfg *config.Config) *GoogleRAG {
+	dbManager, err := data.NewDatabaseManager()
+	if err != nil {
+		panic(fmt.Sprintf("初始化DatabaseManager失败: %v", err))
+	}
 	return &GoogleRAG{
 		Memory:    NewMemory(),
 		Config:    cfg,
-		DbManager: data.NewDatabaseManager(),
+		DbManager: dbManager,
 	}
 }
 
@@ -59,13 +63,10 @@ func (r *GoogleRAG) Initialize() error {
 // PrepareRetriever 为仓库准备检索器
 func (r *GoogleRAG) PrepareRetriever(repoURLOrPath string, accessToken string) error {
 	r.RepoURL = repoURLOrPath
-	var err error
-	r.Documents, err = r.DbManager.PrepareDatabase(repoURLOrPath, accessToken)
-	if err != nil {
+	if err := r.DbManager.PrepareDatabase(repoURLOrPath, accessToken); err != nil {
 		return err
 	}
-
-	log.Printf("已加载 %d 个文档用于检索", len(r.Documents))
+	// 这里可以根据需要加载文档列表（如有必要）
 	return nil
 }
 
