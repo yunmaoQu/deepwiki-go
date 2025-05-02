@@ -3,7 +3,6 @@ module github.com/deepwiki-go
 go 1.21
 
 replace github.com/deepwiki-go => ./
-toolchain go1.21.11
 
 require (
 	cloud.google.com/go/vertexai v0.13.3
