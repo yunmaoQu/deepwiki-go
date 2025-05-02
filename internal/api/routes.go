@@ -1,8 +1,6 @@
 // internal/api/routes.go
 package api
 
-import "github.com/gin-gonic/gin"
-
 // RegisterRoutes 注册所有API路由
 func (s *Server) RegisterRoutes() {
 	// 公开路由
@@ -37,42 +35,4 @@ func (s *Server) RegisterRoutes() {
 	}
 }
 
-// 获取Token
-func (s *Server) handleGetToken(c *gin.Context) {
-	c.JSON(200, gin.H{"token": "mock-token"})
-}
-
-// 健康检查
-func (s *Server) handleHealthCheck(c *gin.Context) {
-	c.JSON(200, gin.H{"status": "ok"})
-}
-
-// 文档向量搜索
-func (s *Server) handleVectorSearch(c *gin.Context) {
-	c.JSON(200, gin.H{"result": "vector search"})
-}
-
-// 文档索引
-func (s *Server) handleIndexDocument(c *gin.Context) {
-	c.JSON(200, gin.H{"result": "index document"})
-}
-
-// 获取文档
-func (s *Server) handleGetDocument(c *gin.Context) {
-	c.JSON(200, gin.H{"result": "get document"})
-}
-
-// 仓库同步
-func (s *Server) handleSyncRepo(c *gin.Context) {
-	c.JSON(200, gin.H{"result": "sync repo"})
-}
-
-// 向量索引
-func (s *Server) handleIndexVectors(c *gin.Context) {
-	c.JSON(200, gin.H{"result": "index vectors"})
-}
-
-// 删除向量
-func (s *Server) handleDeleteVector(c *gin.Context) {
-	c.JSON(200, gin.H{"result": "delete vector"})
-}
+// NOTE: All handler implementations (handleGetToken, handleHealthCheck, etc.) have been moved to handlers.go

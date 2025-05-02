@@ -70,6 +70,30 @@ func (s *Server) setupRoutes() {
 
 	// 仓库分析端点
 	s.router.POST("/repo/analyze", s.handleAnalyzeRepo)
+
+	// 获取JWT令牌端点
+	s.router.POST("/token", s.handleGetToken)
+
+	// 健康检查端点
+	s.router.GET("/health", s.handleHealthCheck)
+
+	// 向量搜索端点
+	s.router.POST("/vector/search", s.handleVectorSearch)
+
+	// 文档索引端点
+	s.router.POST("/document/index", s.handleIndexDocument)
+
+	// 获取单个文档端点
+	s.router.GET("/document/:id", s.handleGetDocument)
+
+	// 仓库同步端点
+	s.router.POST("/repo/sync", s.handleSyncRepo)
+
+	// 向量索引端点
+	s.router.POST("/vector/index", s.handleIndexVectors)
+
+	// 删除向量端点
+	s.router.DELETE("/vector/:id", s.handleDeleteVector)
 }
 
 // Start 启动服务器
@@ -666,4 +690,51 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// handleGetToken 处理获取JWT令牌的请求
+func (s *Server) handleGetToken(c *gin.Context) {
+	// Placeholder - replace with actual token generation logic
+	c.JSON(200, gin.H{"token": "mock-token"})
+}
+
+// handleHealthCheck 处理健康检查请求
+func (s *Server) handleHealthCheck(c *gin.Context) {
+	c.JSON(200, gin.H{"status": "ok"})
+}
+
+// handleVectorSearch 处理向量搜索请求
+func (s *Server) handleVectorSearch(c *gin.Context) {
+	// Placeholder - replace with actual vector search logic
+	c.JSON(200, gin.H{"result": "vector search"})
+}
+
+// handleIndexDocument 处理文档索引请求
+func (s *Server) handleIndexDocument(c *gin.Context) {
+	// Placeholder - replace with actual document indexing logic
+	c.JSON(200, gin.H{"result": "index document"})
+}
+
+// handleGetDocument 处理获取单个文档请求
+func (s *Server) handleGetDocument(c *gin.Context) {
+	// Placeholder - replace with actual document retrieval logic
+	c.JSON(200, gin.H{"result": "get document"})
+}
+
+// handleSyncRepo 处理仓库同步请求
+func (s *Server) handleSyncRepo(c *gin.Context) {
+	// Placeholder - replace with actual repo sync logic
+	c.JSON(200, gin.H{"result": "sync repo"})
+}
+
+// handleIndexVectors 处理向量索引请求
+func (s *Server) handleIndexVectors(c *gin.Context) {
+	// Placeholder - replace with actual vector indexing logic
+	c.JSON(200, gin.H{"result": "index vectors"})
+}
+
+// handleDeleteVector 处理删除向量请求
+func (s *Server) handleDeleteVector(c *gin.Context) {
+	// Placeholder - replace with actual vector deletion logic
+	c.JSON(200, gin.H{"result": "delete vector"})
 }
