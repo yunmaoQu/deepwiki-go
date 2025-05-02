@@ -18,13 +18,13 @@ type ChatCompletionRequest struct {
 
 // Document 表示一个文档
 type Document struct {
-	ID       string    `json:"id"`
-	Title    string    `json:"title"`
-	Text     string    `json:"text"`
-	MetaData map[string]interface{} `json:"meta_data"`
-	Vector   []float32 `json:"vector,omitempty"`
-	Importance   string             `json:"importance"`
-	RelatedPages []string           `json:"related_pages,omitempty"`
+	ID           string                 `json:"id"`
+	Title        string                 `json:"title"`
+	Text         string                 `json:"text"`
+	MetaData     map[string]interface{} `json:"meta_data"`
+	Vector       []float32              `json:"vector,omitempty"`
+	Importance   string                 `json:"importance"`
+	RelatedPages []string               `json:"related_pages,omitempty"`
 }
 
 // WikiPage 表示一个Wiki页面
@@ -49,10 +49,4 @@ type DialogTurn struct {
 	ID                string `json:"id"`
 	UserQuery         string `json:"user_query"`
 	AssistantResponse string `json:"assistant_response"`
-}
-
-// RAGResult 表示 RAG 结果
-type RAGResult struct {
-	Rationale string `json:"rationale"`
-	Answer    string `json:"answer"`
 }

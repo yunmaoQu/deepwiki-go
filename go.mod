@@ -11,9 +11,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
-	github.com/ledongthuc/pdf v0.0.0-20240201131950-da5b75280b06
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
-	github.com/otiai10/gosseract/v2 v2.4.1
 	github.com/pkoukk/tiktoken-go v0.1.7
 	gopkg.in/yaml.v3 v3.0.1
 )

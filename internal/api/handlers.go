@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -20,9 +19,10 @@ import (
 
 // Server 表示API服务器
 type Server struct {
-	router  *gin.Engine
-	config  *config.Config
-	manager *rag.RAGManager
+	router     *gin.Engine
+	config     *config.Config
+	manager    *rag.RAGManager
+	dbManager  *data.DatabaseManager // 添加数据库管理器
 }
 
 // NewServer 创建一个新的服务器实例
@@ -37,62 +37,46 @@ func NewServer(cfg *config.Config) *Server {
 	// 初始化 RAG 管理器
 	manager := rag.NewRAGManager(cfg)
 
-	// 注册默认的 Google RAG 提供者
-	googleRAG := rag.NewGoogleRAG(cfg)
-	if err := manager.RegisterProvider(googleRAG); err != nil {
-		// 记录错误但继续运行，因为我们可能还有其他提供者
-		log.Printf("注册 Google RAG 提供者失败: %v\n", err)
+	// 根据配置注册 RAG 提供者
+	// 检查是否有 Google API Key
+	if cfg.Google.APIKey != "" {
+		googleRAG := rag.NewGoogleRAG(cfg)
+		if err := manager.RegisterProvider(googleRAG); err != nil {
+			log.Printf("注册 Google RAG 提供者失败: %v\n", err)
+		}
+	}
+
+	// 检查是否有 OpenAI API Key
+	if cfg.OpenAIAPIKey != "" {
+		// 注册 OpenAI RAG
+		openaiRAG, err := rag.NewOpenAIRAG(cfg)
+		if err != nil {
+			log.Printf("创建 OpenAI RAG 提供者失败: %v\n", err)
+		} else {
+			if err := manager.RegisterProvider(openaiRAG); err != nil {
+				log.Printf("注册 OpenAI RAG 提供者失败: %v\n", err)
+			}
+		}
+	}
+
+	// 初始化数据库管理器
+	dbManager, err := data.NewDatabaseManager()
+	if err != nil {
+		log.Printf("初始化数据库管理器失败: %v\n", err)
+		// 继续运行，但某些功能可能不可用
 	}
 
 	s := &Server{
-		router:  router,
-		config:  cfg,
-		manager: manager,
+		router:     router,
+		config:     cfg,
+		manager:    manager,
+		dbManager:  dbManager,
 	}
 
 	// 注册路由
 	s.setupRoutes()
 
 	return s
-}
-
-// 文件上传接口，支持 PDF、图片、Markdown
-func (s *Server) UploadHandler(c *gin.Context) {
-	file, err := c.FormFile("file")
-	if err != nil {
-		c.JSON(400, gin.H{"error": "No file uploaded"})
-		return
-	}
-	src, err := file.Open()
-	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to open file"})
-		return
-	}
-	defer src.Close()
-
-	ext := strings.ToLower(filepath.Ext(file.Filename))
-	var content string
-	switch ext {
-	case ".pdf":
-		content, err = ExtractTextFromPDF(src)
-	case ".md":
-		content, err = ExtractTextFromMarkdown(src)
-	case ".jpg", ".jpeg", ".png":
-		content, err = ExtractTextFromImage(src)
-	default:
-		c.JSON(400, gin.H{"error": "Unsupported file type"})
-		return
-	}
-	if err != nil {
-		c.JSON(500, gin.H{"error": "Failed to extract content"})
-		return
-	}
-
-	// TODO: 调用 embedding/vectorizer，将 content 入库
-	c.JSON(200, gin.H{
-		"filename": file.Filename,
-		"content":  content[:min(200, len(content))], // 返回前200字
-	})
 }
 
 // setupRoutes 注册API路由
@@ -744,36 +728,222 @@ func (s *Server) handleHealthCheck(c *gin.Context) {
 
 // handleVectorSearch 处理向量搜索请求
 func (s *Server) handleVectorSearch(c *gin.Context) {
-	// Placeholder - replace with actual vector search logic
-	c.JSON(200, gin.H{"result": "vector search"})
+	var req struct {
+		Query string `json:"query" binding:"required"`
+		TopK  int    `json:"top_k,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的请求: %v", err)})
+		return
+	}
+
+	// 设置默认值
+	if req.TopK <= 0 {
+		req.TopK = 5 // 默认返回5个结果
+	}
+
+	if s.dbManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库管理器未初始化"})
+		return
+	}
+
+	// 执行向量搜索
+	documents, err := s.dbManager.SearchDocuments(req.Query, req.TopK)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("搜索失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"results": documents,
+		"count":   len(documents),
+	})
 }
 
 // handleIndexDocument 处理文档索引请求
 func (s *Server) handleIndexDocument(c *gin.Context) {
-	// Placeholder - replace with actual document indexing logic
-	c.JSON(200, gin.H{"result": "index document"})
+	var doc models.Document
+	if err := c.ShouldBindJSON(&doc); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的文档: %v", err)})
+		return
+	}
+
+	if s.dbManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库管理器未初始化"})
+		return
+	}
+
+	// 确保文档有必要的元数据
+	if doc.MetaData == nil {
+		doc.MetaData = make(map[string]interface{})
+	}
+
+	// 确保文件路径存在
+	if _, ok := doc.MetaData["file_path"]; !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "文档缺少必要的file_path元数据"})
+		return
+	}
+
+	// 添加文档到数据库
+	err := s.dbManager.AddDocument(&doc)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("添加文档失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": "文档已成功索引",
+	})
 }
 
 // handleGetDocument 处理获取单个文档请求
 func (s *Server) handleGetDocument(c *gin.Context) {
-	// Placeholder - replace with actual document retrieval logic
-	c.JSON(200, gin.H{"result": "get document"})
+	// 获取文档ID参数
+	filePath := c.Param("id")
+	if filePath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少文档ID"})
+		return
+	}
+
+	if s.dbManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库管理器未初始化"})
+		return
+	}
+
+	// 从数据库获取文档
+	doc, err := s.dbManager.GetDocument(filePath)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("获取文档失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, doc)
 }
 
 // handleSyncRepo 处理仓库同步请求
 func (s *Server) handleSyncRepo(c *gin.Context) {
-	// Placeholder - replace with actual repo sync logic
-	c.JSON(200, gin.H{"result": "sync repo"})
+	var req struct {
+		RepoURL     string `json:"repo_url" binding:"required"`
+		GitHubToken string `json:"github_token,omitempty"`
+		GitLabToken string `json:"gitlab_token,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的请求: %v", err)})
+		return
+	}
+
+	// 选择访问令牌
+	accessToken := req.GitHubToken
+	if accessToken == "" {
+		accessToken = req.GitLabToken
+	}
+
+	if s.dbManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库管理器未初始化"})
+		return
+	}
+
+	// 初始化库管理器
+	repoManager := data.NewRepositoryManager(s.config)
+
+	// 克隆仓库
+	repoPath, err := repoManager.CloneRepository(req.RepoURL, accessToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("克隆仓库失败: %v", err)})
+		return
+	}
+
+	// 准备数据库（读取文档并索引）
+	err = s.dbManager.PrepareDatabase(repoPath, accessToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("准备数据库失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": "仓库已成功同步并索引",
+		"path":    repoPath,
+	})
 }
 
 // handleIndexVectors 处理向量索引请求
 func (s *Server) handleIndexVectors(c *gin.Context) {
-	// Placeholder - replace with actual vector indexing logic
-	c.JSON(200, gin.H{"result": "index vectors"})
+	var req struct {
+		Documents []models.Document `json:"documents" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的请求: %v", err)})
+		return
+	}
+
+	if s.dbManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库管理器未初始化"})
+		return
+	}
+
+	// 批量添加文档
+	successCount := 0
+	failures := []string{}
+
+	for i, doc := range req.Documents {
+		// 确保文档有必要的元数据
+		if doc.MetaData == nil {
+			doc.MetaData = make(map[string]interface{})
+		}
+
+		// 确保文件路径存在
+		if _, ok := doc.MetaData["file_path"]; !ok {
+			failures = append(failures, fmt.Sprintf("文档 #%d 缺少必要的file_path元数据", i))
+			continue
+		}
+
+		// 添加文档到数据库
+		err := s.dbManager.AddDocument(&doc)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("文档 #%d (%s) 添加失败: %v", 
+				i, doc.MetaData["file_path"], err))
+			continue
+		}
+
+		successCount++
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":         "success",
+		"success_count":  successCount,
+		"failure_count":  len(failures),
+		"failure_details": failures,
+	})
 }
 
 // handleDeleteVector 处理删除向量请求
 func (s *Server) handleDeleteVector(c *gin.Context) {
-	// Placeholder - replace with actual vector deletion logic
-	c.JSON(200, gin.H{"result": "delete vector"})
+	// 获取文档ID参数
+	filePath := c.Param("id")
+	if filePath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少文档ID"})
+		return
+	}
+
+	if s.dbManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库管理器未初始化"})
+		return
+	}
+
+	// 从数据库删除文档
+	err := s.dbManager.DeleteDocument(filePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("删除文档失败: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": fmt.Sprintf("文档 '%s' 已成功删除", filePath),
+	})
 }

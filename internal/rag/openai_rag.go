@@ -90,7 +90,7 @@ func (r *OpenAIRAG) GenerateStreamingResponse(prompt string) (chan string, error
 		// 构造OpenAI Chat Completion流式请求
 		url := "https://api.openai.com/v1/chat/completions"
 		requestBody := map[string]interface{}{
-			"model": "gpt-o3", // 可根据需要切换模型
+			"model": "gpt-o3", 
 			"messages": []map[string]string{{
 				"role":    "user",
 				"content": prompt,
@@ -155,4 +155,28 @@ func (r *OpenAIRAG) GenerateStreamingResponse(prompt string) (chan string, error
 func (r *OpenAIRAG) Close() error {
 	r.OpenAIClient = nil
 	return nil
+}
+
+// IndexDocument 索引文档
+func (r *OpenAIRAG) IndexDocument(doc *models.Document) error {
+	if r.DbManager == nil {
+		return errors.New("数据库管理器未初始化")
+	}
+	return r.DbManager.AddDocument(doc)
+}
+
+// GetDocument 获取文档
+func (r *OpenAIRAG) GetDocument(id string) (*models.Document, error) {
+	if r.DbManager == nil {
+		return nil, errors.New("数据库管理器未初始化")
+	}
+	return r.DbManager.GetDocument(id)
+}
+
+// DeleteDocument 删除文档
+func (r *OpenAIRAG) DeleteDocument(id string) error {
+	if r.DbManager == nil {
+		return errors.New("数据库管理器未初始化")
+	}
+	return r.DbManager.DeleteDocument(id)
 }

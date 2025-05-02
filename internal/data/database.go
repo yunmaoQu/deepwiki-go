@@ -88,15 +88,14 @@ func (dm *DatabaseManager) ensureCollectionExists() error {
 			AutoID:         false,
 			Fields: []*entity.Field{
 				{
-					Name:         "doc_id",
-					DataType:     entity.FieldTypeInt64,
-					IsPrimaryKey: true,
-					AutoID:       false,
+					Name:       "doc_id",
+					DataType:   entity.FieldTypeInt64,
+					PrimaryKey: true,
+					AutoID:     false,
 				},
 				{
-					Name:      "file_path", // Store original file path
-					DataType:  entity.FieldTypeVarChar,
-					MaxLength: 1024, // Adjust as needed
+					Name:     "file_path", // Store original file path
+					DataType: entity.FieldTypeVarChar,
 				},
 				{
 					Name:     "embedding",
@@ -106,14 +105,12 @@ func (dm *DatabaseManager) ensureCollectionExists() error {
 					},
 				},
 				{
-					Name:      "raw_text", // Store the raw text chunk
-					DataType:  entity.FieldTypeVarChar,
-					MaxLength: 65535, // Max length for VarChar
+					Name:     "raw_text", // Store the raw text chunk
+					DataType: entity.FieldTypeVarChar,
 				},
 				{
-					Name:      "metadata_json", // Store metadata as JSON string
-					DataType:  entity.FieldTypeVarChar,
-					MaxLength: 65535,
+					Name:     "metadata_json", // Store metadata as JSON string
+					DataType: entity.FieldTypeVarChar,
 				},
 			},
 		}
@@ -176,9 +173,10 @@ func (dm *DatabaseManager) PrepareDatabase(repoURLOrPath string, accessToken str
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	if err := dm.createRepo(repoURLOrPath, accessToken); err != nil {
-		return err
-	}
+	// Assume repoURLOrPath is a valid local path to the documents.
+	// TODO: Add validation to ensure repoURLOrPath is a directory.
+	localRepoPath := repoURLOrPath // Treat the input as the local path directly.
+	dm.repoPaths["save_repo_dir"] = localRepoPath
 
 	// Check if this repo has already been indexed in Milvus
 	// (We might need a way to track this, e.g., checking a few sample doc IDs)
@@ -324,7 +322,7 @@ func (dm *DatabaseManager) readAllDocuments(path string) ([]models.Document, err
 				!strings.Contains(strings.ToLower(relativePath), "test")
 
 			// Check token count
-			tokenCount := utils.CountTokens(string(content))
+			tokenCount := utils.CountTokens(string(content), "gpt-4o")
 			if tokenCount > 8192 { // Maximum embedding token limit
 				log.Printf("Skipping large file %s: Token count (%d) exceeds limit", relativePath, tokenCount)
 				continue
@@ -452,36 +450,74 @@ func (dm *DatabaseManager) SearchDocuments(query string, topK int) ([]models.Doc
 		return nil, fmt.Errorf("Milvus search failed: %w", err)
 	}
 
-	log.Printf("Milvus search returned %d results.", searchResult.ResultCount)
+	// Search returns a slice of results, one per query vector. We sent one vector.
+	if len(searchResult) == 0 {
+		log.Println("Milvus search returned no result sets.")
+		return []models.Document{}, nil // Return empty list, not an error
+	}
+
+	// Access the results for the first query vector
+	singleQueryResult := searchResult[0]
+
+	log.Printf("Milvus search returned %d results.", singleQueryResult.ResultCount)
 
 	// 4. Process results
 	var documents []models.Document
-	filePathField, _ := searchResult.GetColumn("file_path")
-	rawTextField, _ := searchResult.GetColumn("raw_text")
-	metadataJSONField, _ := searchResult.GetColumn("metadata_json")
+	// Extract columns from the Fields slice by name
+	var filePathCol, rawTextCol, metadataJSONCol entity.Column
+	for _, field := range singleQueryResult.Fields {
+		switch field.Name() {
+		case "file_path":
+			filePathCol = field
+		case "raw_text":
+			rawTextCol = field
+		case "metadata_json":
+			metadataJSONCol = field
+		}
+	}
 
-	filePathData := filePathField.(*entity.ColumnVarChar)
-	rawTextData := rawTextField.(*entity.ColumnVarChar)
-	metadataJSONData := metadataJSONField.(*entity.ColumnVarChar)
+	// Check if all required columns were found
+	if filePathCol == nil || rawTextCol == nil || metadataJSONCol == nil {
+		return nil, fmt.Errorf("Milvus search result missing expected columns (file_path, raw_text, metadata_json) in Fields")
+	}
 
-	for i := 0; i < searchResult.ResultCount; i++ {
-		filePath, _ := filePathData.ValueByIdx(i)
-		rawText, _ := rawTextData.ValueByIdx(i)
-		metadataJSON, _ := metadataJSONData.ValueByIdx(i)
+	// Perform type assertion
+	filePathData, ok1 := filePathCol.(*entity.ColumnVarChar)
+	rawTextData, ok2 := rawTextCol.(*entity.ColumnVarChar)
+	metadataJSONData, ok3 := metadataJSONCol.(*entity.ColumnVarChar)
+
+	if !ok1 || !ok2 || !ok3 {
+		return nil, fmt.Errorf("Milvus search result columns have unexpected types (expected VarChar)")
+	}
+
+	for i := 0; i < int(singleQueryResult.ResultCount); i++ { // Use int() conversion for loop range
+		// Check index bounds just in case, though ResultCount should match column length
+		if i >= filePathData.Len() || i >= rawTextData.Len() || i >= metadataJSONData.Len() {
+			log.Printf("Warning: Milvus result index %d out of bounds for column length", i)
+			continue
+		}
+
+		filePath, err1 := filePathData.ValueByIdx(i)
+		rawText, err2 := rawTextData.ValueByIdx(i)
+		metadataJSON, err3 := metadataJSONData.ValueByIdx(i)
+
+		if err1 != nil || err2 != nil || err3 != nil {
+			log.Printf("Warning: failed to retrieve values for index %d: %v, %v, %v", i, err1, err2, err3)
+			continue
+		}
 
 		var metadata map[string]interface{}
 		if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
 			log.Printf("Warning: failed to unmarshal metadata for '%s': %v", filePath, err)
-			metadata = make(map[string]interface{}) // Use empty map on error
+			metadata = make(map[string]interface{})
 			metadata["error"] = "failed to parse stored metadata"
 			metadata["file_path"] = filePath // Ensure file_path is present
 		}
 
 		doc := models.Document{
-			// ID needs to be retrieved if required, or use file_path as identifier
 			Text:     rawText,
 			MetaData: metadata,
-			// Score: searchResult.Scores[i] // Access score if needed
+			// Score: singleQueryResult.Scores[i],
 		}
 		documents = append(documents, doc)
 	}
@@ -563,19 +599,41 @@ func (dm *DatabaseManager) GetDocument(filePath string) (*models.Document, error
 		return nil, fmt.Errorf("Milvus query for ID %d failed: %w", docID, err)
 	}
 
-	if results.ResultCount == 0 {
+	if results.Len() == 0 {
 		return nil, fmt.Errorf("document with path '%s' (ID: %d) not found in Milvus", filePath, docID)
 	}
 
 	// Should only be one result for a primary key query
+	// Use GetColumn directly on client.ResultSet
 	rawTextField := results.GetColumn("raw_text")
 	metadataJSONField := results.GetColumn("metadata_json")
 
-	rawTextData := rawTextField.(*entity.ColumnVarChar)
-	metadataJSONData := metadataJSONField.(*entity.ColumnVarChar)
+	// Check if all required columns were found
+	if rawTextField == nil || metadataJSONField == nil {
+		return nil, fmt.Errorf("Milvus query result missing expected columns (raw_text, metadata_json)")
+	}
 
-	rawText, _ := rawTextData.ValueByIdx(0)
-	metadataJSON, _ := metadataJSONData.ValueByIdx(0)
+	// Perform type assertion
+	rawTextData, ok1 := rawTextField.(*entity.ColumnVarChar)
+	metadataJSONData, ok2 := metadataJSONField.(*entity.ColumnVarChar)
+
+	if !ok1 || !ok2 {
+		return nil, fmt.Errorf("Milvus query result columns have unexpected types (expected VarChar)")
+	}
+
+	// filePath is already declared as function argument, use = instead of :=
+	// Also, we query by doc_id derived from filePath, so we don't need to retrieve it again.
+	// We only need raw_text and metadata_json.
+	if rawTextData.Len() == 0 || metadataJSONData.Len() == 0 {
+		return nil, fmt.Errorf("Milvus query result columns are empty for doc_id %d", docID)
+	}
+
+	rawText, err1 := rawTextData.ValueByIdx(0)
+	metadataJSON, err2 := metadataJSONData.ValueByIdx(0)
+
+	if err1 != nil || err2 != nil {
+		return nil, fmt.Errorf("failed to retrieve values from Milvus query result for doc_id %d: %v, %v", docID, err1, err2)
+	}
 
 	var metadata map[string]interface{}
 	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
