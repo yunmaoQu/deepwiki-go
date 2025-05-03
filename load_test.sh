@@ -7,11 +7,13 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# 设置环境变量
+export TEST_TOKEN="$TOKEN"
+export TEST_CONCURRENT=10000
+export TEST_TOTAL=100000
+
 # 运行负载测试
-go test -v -run TestLoad -timeout 30m internal/api/load_test.go -args \
-    -token "$TOKEN" \
-    -concurrent 10000 \
-    -total 100000
+go test -v -run TestLoad -timeout 30m internal/api/load_test.go
 
 # 输出结果
 echo "Load test completed"

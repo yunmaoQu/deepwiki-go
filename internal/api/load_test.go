@@ -1,9 +1,10 @@
 package api
 
 import (
-	"flag"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,19 +13,33 @@ import (
 
 // TestLoad 测试服务器负载能力
 func TestLoad(t *testing.T) {
-	// 解析命令行参数
-	token := flag.String("token", "", "JWT token")
-	concurrent := flag.Int("concurrent", 10000, "并发请求数")
-	total := flag.Int("total", 100000, "总请求数")
-	flag.Parse()
+	// 从环境变量获取配置
+	token := os.Getenv("TEST_TOKEN")
+	if token == "" {
+		t.Fatal("TEST_TOKEN environment variable is required")
+	}
 
-	if *token == "" {
-		t.Fatal("JWT token is required")
+	concurrentStr := os.Getenv("TEST_CONCURRENT")
+	if concurrentStr == "" {
+		concurrentStr = "10000"
+	}
+	concurrent, err := strconv.Atoi(concurrentStr)
+	if err != nil {
+		t.Fatalf("Invalid TEST_CONCURRENT value: %v", err)
+	}
+
+	totalStr := os.Getenv("TEST_TOTAL")
+	if totalStr == "" {
+		totalStr = "100000"
+	}
+	total, err := strconv.Atoi(totalStr)
+	if err != nil {
+		t.Fatalf("Invalid TEST_TOTAL value: %v", err)
 	}
 
 	var (
-		concurrentRequests = *concurrent  // 并发请求数
-		totalRequests      = *total      // 总请求数
+		concurrentRequests = concurrent  // 并发请求数
+		totalRequests      = total      // 总请求数
 	)
 
 	var (
