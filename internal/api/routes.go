@@ -9,7 +9,7 @@ func (s *Server) RegisterRoutes() {
 
 	// 需要认证的路由组
 	auth := s.router.Group("/")
-	auth.Use(AuthMiddleware())
+	auth.Use(AuthMiddleware(s.config))
 	auth.Use(RateLimitMiddleware())
 	{
 		// 聊天相关

@@ -1,20 +1,15 @@
 package rag
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-
-	"bufio"
-	"strings"
 
 	"github.com/deepwiki-go/internal/config"
 	"github.com/deepwiki-go/internal/data"
 	"github.com/deepwiki-go/internal/models"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 // OpenAIRAG 实现基于 OpenAI 的检索增强生成
@@ -23,7 +18,7 @@ type OpenAIRAG struct {
 	Config       *config.Config
 	DbManager    *data.DatabaseManager
 	RepoURL      string
-	OpenAIClient *http.Client 
+	OpenAIClient *openai.Client
 }
 
 // NewOpenAIRAG 创建一个新的 OpenAI RAG 实例
@@ -49,8 +44,7 @@ func (r *OpenAIRAG) Initialize() error {
 	if r.Config.OpenAIAPIKey == "" {
 		return fmt.Errorf("缺少必要的 OpenAI API Key")
 	}
-	// 初始化OpenAI客户端
-	r.OpenAIClient = &http.Client{}
+	r.OpenAIClient = openai.NewClient(r.Config.OpenAIAPIKey)
 	return nil
 }
 
@@ -82,69 +76,30 @@ func (r *OpenAIRAG) GenerateStreamingResponse(prompt string) (chan string, error
 	if r.OpenAIClient == nil {
 		return nil, errors.New("OpenAI 客户端未初始化")
 	}
-
 	responseCh := make(chan string)
 	go func() {
 		defer close(responseCh)
-
-		// 构造OpenAI Chat Completion流式请求
-		url := "https://api.openai.com/v1/chat/completions"
-		requestBody := map[string]interface{}{
-			"model": "gpt-o3", 
-			"messages": []map[string]string{{
-				"role":    "user",
-				"content": prompt,
+		req := openai.ChatCompletionRequest{
+			Model: openai.GPT3Dot5Turbo, // 可切换为 openai.GPT4, openai.GPT4o
+			Messages: []openai.ChatCompletionMessage{{
+				Role:    openai.ChatMessageRoleUser,
+				Content: prompt,
 			}},
-			"stream": true,
+			Stream: true,
 		}
-		jsonData, _ := json.Marshal(requestBody)
-
-		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-		if err != nil {
-			responseCh <- "请求构建失败"
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+r.Config.OpenAIAPIKey)
-
-		resp, err := r.OpenAIClient.Do(req)
+		stream, err := r.OpenAIClient.CreateChatCompletionStream(context.Background(), req)
 		if err != nil {
 			responseCh <- "请求发送失败: " + err.Error()
 			return
 		}
-		defer resp.Body.Close()
-
-		reader := bufio.NewReader(resp.Body)
+		defer stream.Close()
 		for {
-			line, err := reader.ReadString('\n')
+			resp, err := stream.Recv()
 			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				responseCh <- "读取响应失败: " + err.Error()
 				break
 			}
-			line = strings.TrimSpace(line)
-			if line == "" || !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			if line == "data: [DONE]" {
-				break
-			}
-			// 解析JSON块
-			var chunk struct {
-				Choices []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-				} `json:"choices"`
-			}
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err == nil {
-				for _, choice := range chunk.Choices {
-					if choice.Delta.Content != "" {
-						responseCh <- choice.Delta.Content
-					}
-				}
+			if len(resp.Choices) > 0 {
+				responseCh <- resp.Choices[0].Delta.Content
 			}
 		}
 	}()

@@ -19,10 +19,10 @@ import (
 
 // Server 表示API服务器
 type Server struct {
-	router     *gin.Engine
-	config     *config.Config
-	manager    *rag.RAGManager
-	dbManager  *data.DatabaseManager // 添加数据库管理器
+	router    *gin.Engine
+	config    *config.Config
+	manager   *rag.RAGManager
+	dbManager *data.DatabaseManager // 添加数据库管理器
 }
 
 // NewServer 创建一个新的服务器实例
@@ -67,10 +67,10 @@ func NewServer(cfg *config.Config) *Server {
 	}
 
 	s := &Server{
-		router:     router,
-		config:     cfg,
-		manager:    manager,
-		dbManager:  dbManager,
+		router:    router,
+		config:    cfg,
+		manager:   manager,
+		dbManager: dbManager,
 	}
 
 	// 注册路由
@@ -644,8 +644,6 @@ func addDirStructure(diagram *strings.Builder, parentID string, content map[stri
 	}
 }
 
-// 辅助函数
-
 // getRepoNameFromURL 从URL中提取仓库名称
 func getRepoNameFromURL(url string) string {
 	// 移除协议前缀
@@ -705,14 +703,6 @@ func isNonEssentialDir(dirName string) bool {
 	}
 
 	return nonEssentialDirs[dirName]
-}
-
-// min 返回两个整数中较小的一个
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // handleGetToken 处理获取JWT令牌的请求
@@ -905,7 +895,7 @@ func (s *Server) handleIndexVectors(c *gin.Context) {
 		// 添加文档到数据库
 		err := s.dbManager.AddDocument(&doc)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("文档 #%d (%s) 添加失败: %v", 
+			failures = append(failures, fmt.Sprintf("文档 #%d (%s) 添加失败: %v",
 				i, doc.MetaData["file_path"], err))
 			continue
 		}
@@ -914,9 +904,9 @@ func (s *Server) handleIndexVectors(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":         "success",
-		"success_count":  successCount,
-		"failure_count":  len(failures),
+		"status":          "success",
+		"success_count":   successCount,
+		"failure_count":   len(failures),
 		"failure_details": failures,
 	})
 }

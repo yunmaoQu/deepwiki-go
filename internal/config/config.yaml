@@ -33,3 +33,6 @@ db:
 logging:
   level: "info" # debug, info, warn, error
   format: "text" # text or json
+
+auth:
+  enable_jwt: false  # 本地开发设为false，生产设为true

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/deepwiki-go/internal/config"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-jwt/jwt/v5"
@@ -46,8 +47,8 @@ func init() {
 	limiter = &RateLimiter{
 		tokens:     make(map[string]float64),
 		lastUpdate: make(map[string]time.Time),
-		rate:       1,     // 每秒生成1个令牌
-		capacity:   10,    // 最多存储10个令牌
+		rate:       1,  // 每秒生成1个令牌
+		capacity:   10, // 最多存储10个令牌
 	}
 
 	// 初始化Redis客户端
@@ -95,9 +96,14 @@ func CORSMiddleware() gin.HandlerFunc {
 }
 
 // AuthMiddleware 实现JWT认证
-func AuthMiddleware() gin.HandlerFunc {
+func AuthMiddleware(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 从请求头获取token
+		if cfg != nil && !cfg.Auth.EnableJWT {
+			// 本地模式，直接放行
+			c.Next()
+			return
+		}
+		// 生产模式，校验JWT
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
 			c.AbortWithStatusJSON(401, gin.H{"error": "未提供认证令牌"})
@@ -146,7 +152,7 @@ func RateLimitMiddleware() gin.HandlerFunc {
 
 		// 使用Redis实现滑动窗口速率限制
 		now := time.Now().Unix()
-		windowSize := int64(60) // 1分钟的窗口
+		windowSize := int64(60)  // 1分钟的窗口
 		maxRequests := int64(60) // 每分钟最大请求数
 
 		// 使用管道执行原子操作
@@ -155,7 +161,7 @@ func RateLimitMiddleware() gin.HandlerFunc {
 		pipe.ZAdd(ctx, key, &redis.Z{Score: float64(now), Member: now})
 		pipe.ZCard(ctx, key)
 		pipe.Expire(ctx, key, time.Minute)
-		
+
 		res, err := pipe.Exec(ctx)
 		if err != nil {
 			// Redis错误时降级为内存限流

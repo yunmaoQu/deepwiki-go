@@ -1,15 +1,15 @@
 package config
 
 import (
-	"os"
 	"log"
+	"os"
 
 	"gopkg.in/yaml.v3"
 )
 
 // ServerConfig holds server-related configuration
 type ServerConfig struct {
-	Port     string `yaml:"port"`
+	Port      string `yaml:"port"`
 	JWTSecret string `yaml:"jwt_secret,omitempty"` // Optional JWT secret
 }
 
@@ -30,12 +30,12 @@ type RetrieverConfig struct {
 // DBConfig holds database configuration
 type DBConfig struct {
 	Type             string `yaml:"type"`
-	Path             string `yaml:"path,omitempty"` // Used for file-based DBs like JSON, SQLite
+	Path             string `yaml:"path,omitempty"`              // Used for file-based DBs like JSON, SQLite
 	ConnectionString string `yaml:"connection_string,omitempty"` // Used for server-based DBs like Postgres
-	
+
 	// Milvus specific settings
-	MilvusAddress      string `yaml:"milvus_address,omitempty"` // Milvus server address, default: localhost:19530
-	MilvusCollection   string `yaml:"milvus_collection,omitempty"` // Milvus collection name, default: deepwiki_documents
+	MilvusAddress      string `yaml:"milvus_address,omitempty"`      // Milvus server address, default: localhost:19530
+	MilvusCollection   string `yaml:"milvus_collection,omitempty"`   // Milvus collection name, default: deepwiki_documents
 	EmbeddingDimension int    `yaml:"embedding_dimension,omitempty"` // Dimension of embedding vectors, default: 768
 }
 
@@ -58,6 +58,11 @@ type FileFiltersConfig struct {
 	ExcludedFiles []string `yaml:"excluded_files"`
 }
 
+// AuthConfig holds authentication configuration
+type AuthConfig struct {
+	EnableJWT bool `yaml:"enable_jwt"`
+}
+
 // Config holds the overall application configuration
 type Config struct {
 	Server       ServerConfig       `yaml:"server"`
@@ -68,6 +73,7 @@ type Config struct {
 	TextSplitter TextSplitterConfig `yaml:"text_splitter"`
 	FileFilters  FileFiltersConfig  `yaml:"file_filters"`
 	OpenAIAPIKey string             `yaml:"openai_api_key"`
+	Auth         AuthConfig         `yaml:"auth"`
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -105,7 +111,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	if openAIAPIKeyEnv := os.Getenv("OPENAI_API_KEY"); openAIAPIKeyEnv != "" {
 		config.OpenAIAPIKey = openAIAPIKeyEnv
 	}
-    // Add more environment variable overrides as needed
+	// Add more environment variable overrides as needed
 
 	log.Println("Configuration loaded successfully")
 	return config, nil
