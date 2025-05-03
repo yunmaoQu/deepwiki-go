@@ -13,6 +13,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
 	github.com/pkoukk/tiktoken-go v0.1.7
+	github.com/sashabaranov/go-openai v1.39.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -80,7 +80,7 @@ func (r *OpenAIRAG) GenerateStreamingResponse(prompt string) (chan string, error
 	go func() {
 		defer close(responseCh)
 		req := openai.ChatCompletionRequest{
-			Model: openai.GPT3Dot5Turbo, // 可切换为 openai.GPT4, openai.GPT4o
+			Model: openai.O4Mini2020416,
 			Messages: []openai.ChatCompletionMessage{{
 				Role:    openai.ChatMessageRoleUser,
 				Content: prompt,
