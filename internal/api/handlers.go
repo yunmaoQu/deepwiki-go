@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"io"
 	"log"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/deepwiki-go/internal/models"
 	"github.com/deepwiki-go/internal/rag"
 	"github.com/gin-gonic/gin"
+	"time"
 )
 
 // Server 表示API服务器
@@ -707,8 +709,44 @@ func isNonEssentialDir(dirName string) bool {
 
 // handleGetToken 处理获取JWT令牌的请求
 func (s *Server) handleGetToken(c *gin.Context) {
-	// Placeholder - replace with actual token generation logic
-	c.JSON(200, gin.H{"token": "mock-token"})
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Verify credentials (you should implement your actual authentication logic here)
+	if req.Username != "admin" || req.Password != "password" {
+		c.JSON(401, gin.H{"error": "Invalid credentials"})
+		return
+	}
+
+	// Create token
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"username": req.Username,
+		"exp":      time.Now().Add(time.Hour * 24).Unix(), // Token expires in 24 hours
+	})
+
+	// Sign token
+	if s.config.Server.JWTSecret == "" {
+		c.JSON(500, gin.H{"error": "JWT secret not configured"})
+		return
+	}
+
+	tokenString, err := token.SignedString([]byte(s.config.Server.JWTSecret))
+	if err != nil {
+		c.JSON(500, gin.H{"error": "Failed to generate token"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"token":      tokenString,
+		"expires_in": 86400, // 24 hours in seconds
+	})
 }
 
 // handleHealthCheck 处理健康检查请求

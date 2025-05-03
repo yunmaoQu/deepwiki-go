@@ -10,7 +10,7 @@ import (
 // ServerConfig holds server-related configuration
 type ServerConfig struct {
 	Port      string `yaml:"port"`
-	JWTSecret string `yaml:"jwt_secret,omitempty"` // Optional JWT secret
+	JWTSecret string `yaml:"jwt_secret"`
 }
 
 // GoogleConfig holds Google Cloud related configuration
