@@ -38,7 +38,7 @@ func TestLoad(t *testing.T) {
 	}
 
 	var (
-		concurrentRequests = concurrent  // 并发请求数
+		concurrentRequests = concurrent // 并发请求数
 		totalRequests      = total      // 总请求数
 	)
 
@@ -55,7 +55,7 @@ func TestLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+*token)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	// 开始压测
 	for i := 0; i < totalRequests; i++ {
