@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 获取JWT token
-TOKEN=$(go run internal/api/test_token.go -secret "your-jwt-secret")
+TOKEN=$(go run cmd/test-token/main.go -secret "your-jwt-secret")
 if [ $? -ne 0 ]; then
     echo "Failed to generate JWT token"
     exit 1

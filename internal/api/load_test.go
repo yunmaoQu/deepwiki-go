@@ -1,6 +1,7 @@
 package api
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 	"sync"
@@ -11,9 +12,19 @@ import (
 
 // TestLoad 测试服务器负载能力
 func TestLoad(t *testing.T) {
-	const (
-		concurrentRequests = 10000  // 并发请求数
-		totalRequests      = 100000 // 总请求数
+	// 解析命令行参数
+	token := flag.String("token", "", "JWT token")
+	concurrent := flag.Int("concurrent", 10000, "并发请求数")
+	total := flag.Int("total", 100000, "总请求数")
+	flag.Parse()
+
+	if *token == "" {
+		t.Fatal("JWT token is required")
+	}
+
+	var (
+		concurrentRequests = *concurrent  // 并发请求数
+		totalRequests      = *total      // 总请求数
 	)
 
 	var (
@@ -23,16 +34,13 @@ func TestLoad(t *testing.T) {
 		startTime    = time.Now()
 	)
 
-	// 创建JWT token（假设我们已经有一个有效的token）
-	token := "your-valid-jwt-token"
-
 	// 准备请求
 	req, err := http.NewRequest("GET", "http://localhost:8080/api/health", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+*token)
 
 	// 开始压测
 	for i := 0; i < totalRequests; i++ {
